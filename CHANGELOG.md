@@ -2,6 +2,16 @@
 
 All notable changes to ecm-tools-reloaded are documented in this file.
 
+## [3.0.1.1] — 2026-06-10
+
+### Bug Fixes
+
+- **Fixed crash on successive GUI operations** — `OnRun` reassigned
+  `m_worker = std::thread(...)` without joining the previous thread,
+  causing `std::terminate()` ("terminate called without an active
+  exception") on every second operation. Fixed by calling
+  `m_worker.join()` before creating the new thread.
+
 ## [3.0.1.0] — 2026-06-10
 
 ### CUE Split/Combine Utility

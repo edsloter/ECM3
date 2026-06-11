@@ -23,11 +23,11 @@
  *
  ******************************************************************************/
 
-#define TITLE "ecm3 v3.0.1.0"
+#define TITLE "ecm3 v3.0.1.1"
 #define COPYR "Update on Error Code Modeler with advanced features"
 #define SUBTL "Based on the original ECM by Neill Corlett, reloaded by Daniel Carrasco."
 #define AUTHR "Copyright (C) 2026 Edward Sloter"
-#define VERSI "3.0.1.0"
+#define VERSI "3.0.1.1"
 
 #include "banner.h"
 #include "sector_tools.h"

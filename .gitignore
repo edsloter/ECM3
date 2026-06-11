@@ -38,3 +38,13 @@ test*
 
 # Google Docs files
 **.gsheet
+
+cueexamples/
+*.cue
+
+# Test tool, not part of the build
+dumpmeta.*
+.continue/
+.continue/*.*
+temptest/
+SUMMARY.md

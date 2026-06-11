@@ -1,102 +1,256 @@
-# ecm-tool reloaded
+# ecm3
 
-Error Code Modeler Reloaded
+Error Code Modeler 3 — encode and decode CD-ROM disc images into the ECM3 format with sector-level lossless compression, track metadata preservation, and bit-identical output across machines.
 
-Based in the Neill Corlett ECM
+Based on the original ECM by Neill Corlett, reloaded by Daniel Carrasco.
 
-By Daniel Carrasco (https://www.electrosoftcloud.com)
+For the original readme, see [README_original.md](README_original.md).  
+For a full list of changes, see [CHANGELOG.md](CHANGELOG.md).
 
-** I recommend to use the latest version, because old versions can contains bugs or incompatible features **                                                                                                                                                             
+## GUI
 
-# Description
+ecm3 ships with a full **wxWidgets 3.2+** graphical interface (`ecm3-gui`) alongside the CLI tool. It provides the same encode/decode, batch, and CUE split/combine functionality without needing command-line flags.
 
-This ECM Tool allows you to remove all recoverable data from CD-ROM sectors, reducing the image size about 20% without using compression (depending of sectors types). This will allow to read the data from it very fast, and also can be complemented with a compression tool like 7zip to reach higher compression ratios.
+| Platform | Build method | Script |
+|---|---|---|
+| Windows | MSYS2 MinGW64 (g++ 16.1.0+) | `build_gui.ps1 -Static` |
+| Linux | wx-config / wx-config-static | `./build_gui.sh` or `STATIC=1 ./build_gui.sh` |
 
-This tool is completely loossless, so original data can be recovered without problems.
+The GUI is built as a separate executable (`ecm3-gui`) from the same source tree. The CLI `ecm3` executable has no dependency on wxWidgets.
 
-In the v2 versions, internal compression was added and then external tools are not required anymore. ECM Tool Reloaded is also able to detect the stream type. This make possible to use FLAC compresison in an Audio stream, which compress much more than other compression methods like LZMA or ZLIB.
+**Windows**: Run `powershell -File build_gui.ps1 -Static` from the project root. Produces a fully static `release/win64_gui/ecm3-gui.exe` (~9.8 MB standalone, no DLL dependencies).
 
-# Compression tests
+**Linux**: Run `./build_gui.sh` (dynamic, ~1.2 MB + wx DLLs) or `STATIC=1 ./build_gui.sh` (fully static). Requires `wx-config` (or `wx-config-static` for static builds).
 
-This tests were made using the original ECM tool made by Neill Colett, this ECM Tool Reloaded without compression (just EC removal), 7zip extreme compression, Original ECM tool + 7zip extreme compression and this ECM Tool Reloaded using its internal compression method (LZMA for data and FLAC for audio, both in extreme compression mode).
+### GUI Tabs
 
-|            | Original Size |    Original ECM   | ECM Tool Reloaded |        7zip       | Original ECM + 7z | ECM Tool Reloaded (Compressed) |
-|:----------:|:-------------:|:-----------------:|:-----------------:|:-----------------:|:-----------------:|:------------------------------:|
-| FFVIII CD3 |  721.508.928  | 635.001.493 (12%) | 574.742.104 (20%) | 438.608.753 (39%) | 365.071.928 (49%) |        362.903.256 (50%)       |
-| Firebugs   |  608.401.248  |  597.995.580 (2%) |  560.062.104 (8%) | 498.312.033 (18%) | 493.397.731 (19%) |        363.280.352 (40%)       |
-| Tekken 3   |  687.922.368  |  645.620.932 (6%) | 606.047.556 (12%) | 457.049.639 (34%) | 426.481.504 (38%) |        417.325.163 (39%)       |
+| Tab | Function |
+|---|---|
+| **Encode** | Select BIN or CUE, compression settings, output path. Run encode. |
+| **Decode** | Select `.ecm3`, output path, split option. Run decode. |
+| **Batch Encode** | Directory + compression settings. Recursively encodes all `.cue` files. |
+| **Batch Decode** | Directory. Recursively decodes all `.ecm3` files. |
+| **CUE Split/Combine** | Split a combined `.cue`/`.bin` into per-track files, or combine per-track files into a single image. Requires output directory. |
+| **Settings** | Register/unregister `.ecm3` file association (Windows). |
+| **About** | Version and license info. |
 
+All tabs show real-time progress in a log pane at the bottom of the window.
 
-As you can see, the ECM Tool Reloaded uncompressed size is improved a bit by removing more data and dummy sectors from the streams. The CDDA tracks in Firebugs have caused a poor reduction ratio in original ECM tool because it keeps all the sectors. Reloaded conversely removes the GAP data, so  reduction ratio is improved a bit.
+## Features
 
-About the compressed versions, the 7zip standalone compression is as expected the worst of all. The compression ratio if LZMA compressor was improved by the Original ECM Tool thanks to the removed data. The Reloaded version improves notably the CDDA compression ratio thanks to the FLAC compression, but is similar to the Original ECM Tool + 7zip if the image doesn't contains any CDDA track (it is even a bit worst). This maybe can be improved by using bigger blocks during the compression step, but will need more memory for the process.
+- **Lossless** — decoded output is bit-identical to the original image
+- **Deterministic** — same disc content always produces the same .ecm3 file, regardless of original filename, machine, run, or number of threads
+- **Parallel encoding and decoding** — `-j` flag uses multiple cores; streams are processed independently then assembled in fixed order, guaranteeing bit-identical output with any `-j` value
+- **Internal compression** — zlib, ZSTD, LZMA, LZMA2, LZ4, FLAC, and WavPack per-stream
+- **CUE sheet support** — embed track metadata on encode; auto-reconstruct `.cue` on decode
+- **CUE split/combine utility** — `--split-cue` and `--combine-cue` flags (and GUI tab) for splitting combined images into per-track files or merging per-track files back into a single image. Bit-identical round-trip verified.
+- **Split-BIN handling** — concatenate multi-file CUE images on encode; optionally split on decode
+- **Auto CUE detection** — pass a `.cue` file as input and the referenced BIN is found automatically
+- **Seekable output** — compression reset points every N sectors for fast seeking without full decompression
+- **GUI** — wxWidgets-based graphical interface covering all encode, decode, batch, and CUE utility operations
 
-# Usage
+## Usage
+
+### Encode
 
 ```
-To encode:
-    ecmtool -i/--input cdimagefile
-    ecmtool -i/--input cdimagefile -o/--output ecmfile
-
-To decode:
-    ecmtool -i/--input ecmfile
-    ecmtool -i/--input ecmfile -o/--output cdimagefile
-
-Optional options:
-    -a/--acompression <zlib/lzma/lz4/flac>
-           Enable audio compression
-    -d/--dcompression <zlib/lzma/lz4>
-           Enable data compression
-    -c/--clevel <0-9>
-           Compression level between 0 and 9
-    -e/--extreme-compression
-           Enables extreme compression mode for LZMA/FLAC (can be very slow)
-    -s/--seekable
-           Create a seekable file. Reduce the compression ratio but
-           but allow to seek into the stream.
-    -p/--sectors_per_block <sectors>
-           Add a end of block mark every X sectors in a seekable file. Max 255.
-    -f/--force
-           Force to ovewrite the output file
-    -k/--keep-output
-           Keep the output when the process has failed
+ecm3 -i cdimage.bin
+ecm3 -i cdimage.bin -o output.ecm3
+ecm3 -i cdimage.bin --cue cdimage.cue
+ecm3 -i cdimage.cue                    # auto-detects BIN reference
 ```
 
-# Features
+### Decode
 
-* Improved sector detection. Now it detects and removes GAP and Dummy sectors (zeroed data).
-* Optimizes almost all non data bytes from sectors (remove sync, addr, mode, 50% of flags, EDC and ECC)
-* Detects automatically if some of the optimizations cannot be done in a lossless way, and disable the failing optimization (copy protections).
-* A bit faster encoding/decoding: About 8s to encode or decode the FFVIII Disk 1 vs 11-14s of the original ECM tool.
-* Internal zlib, lzma, lz4 and FLAC compressions to do not depend of external tools.
-* Contains a sectors TOC in header and sectors sizes are constant, so it can be easily indexed.
+```
+ecm3 -i cdimage.ecm3
+ecm3 -i cdimage.ecm3 -o cdimage.bin
+ecm3 -i cdimage.ecm3 -S               # split into per-track BINs + multi-FILE .cue
+```
 
-# Changelog
+When a `.cue` file contains track metadata, the decoded output automatically gets an accompanying `.cue` file. No extra flags needed.
 
-Changelog can be viewed in [CHANGELOG.md](docs/CHANGELOG.md) file
+### CUE Split
 
-# FAQ
+```
+ecm3 --split-cue combined.cue -o output_dir
+```
 
-## How this program works
+Splits a combined single-FILE `.cue`/`.bin` into per-track `.bin` files and a multi-FILE `.cue`. Single-track images are a no-op.
 
-CDROM data is splitted in sectors, and those sectors are of 2352 bytes size. Depending of the sector type, it may contains Error Detection Code and Error Correction Code data, which will help to the CDROM drive to detect and recover a sector if it is damaged (for example by dust or even little scratches). This data is generated during the burn process and can be easily generated using an algorithm, and like it is not usefull to keep the data outside a CDROM, can be removed. On the decoding process the program will generate that data again and then the image file will be exactly like the original (checked using MD5, SHA1...).
+### CUE Combine
 
-You can find more info in the [CDROM Rainbow books](https://en.wikipedia.org/wiki/Rainbow_Books) 
+```
+ecm3 --combine-cue split.cue -o output_dir
+```
 
-## Why I have created this "Reloaded" version
+Combines per-track `.bin` files (from a multi-FILE `.cue`) into a single `.bin` and a single-FILE `.cue`. Strips `(Track NN)` suffixes from filenames and adjusts INDEX positions from relative to absolute.
 
-The original program created by Neill Corlett is a very good tool... I was using it for a long time to store my CDROM images collection. The problem is that original ecm tool process the file without a clear block separation, storing the sectors info scattered in file. That makes the file unseekable or at least very hard to be seeked, and that is why my program was created.
+`-f` controls overwrite of files in the output directory.
 
-The ECM2 format keeps the sectors data in header, so just reading that data you can generate an index to seek in file very fast. Then you just will have to read the sector data depending of which type is, and regenerate the removed data easily. I think that this will be usefull for emulators and I am planning to do some tests in the future.
+### Options
 
-ECM2 format also removes more data than original ECM format (depending of sector type, of course), like MSF if not libcrypt protection exists in game, sync, redundant flags, and zeroed sectors. This will help to save up to 8% of the image size.
+| Option | Description |
+|---|---|
+| `-i` / `--input` | Input file (BIN or ECM3; `.cue` also accepted for encode) |
+| `-o` / `--output` | Output file (encode/decode) or output directory (split/combine) |
+| `--cue` | CUE sheet for track metadata (encode only; auto-detected if input is `.cue`) |
+| `-S` / `--split` | Split output into per-track BIN files with multi-FILE .cue (decode only) |
+| `--split-cue` | Split combined `.cue`/`.bin` into per-track files (requires `-o <dir>`) |
+| `--combine-cue` | Combine per-track `.cue`/`.bin` into a single image (requires `-o <dir>`) |
+| `-a` / `--acompression` | Audio compression: `zlib`, `lzma`, `lzma2`, `lz4`, `flac`, `wavpack` |
+| `-d` / `--dcompression` | Data compression: `zlib`, `lzma`, `lzma2`, `lz4`, `zstd` |
+| `-c` / `--clevel` | Compression level 0–9 |
+| `-e` / `--extreme-compression` | Extreme compression mode for LZMA/FLAC/WavPack (slower, higher ratio) |
+| `-s` / `--seekable` | Create a seekable file (reduces compression ratio) |
+| `-p` / `--sectors-per-block` | End-of-block mark interval for seekable files (max 255) |
+| `-f` / `--force` | Overwrite output file(s) if they exist |
+| `-k` / `--keep-output` | Keep output file on error |
+| `-j` / `--jobs` | Parallel streams for encoding and decoding (0 = auto-detect cores, default 0) |
+| `-V` / `--verify` | Verify `.ecm3` integrity (decode to NUL + EDC check, no output written) |
+| `--delete-source` | Delete source file after successful encode/decode |
+| `--batch-cue <dir>` | Encode all `.cue` files in a directory tree |
+| `--batch-decode <dir>` | Decode all `.ecm3` files in a directory tree |
 
-Finally, ECM2 format includes compression support which not only will allow to do everything in the same program, also will allow to compress every stream type with a different method, getting higher compression ratios in images that contains CDDA tracks thanks to the FLAC algorithm. The best example is the above Firebugs comparison in compression tests.
+## CUE Sheet Workflow
 
-## Can be used with Audio CD images
+### Encode
 
-Of course!... but the resulting file will be just the compressed stream if compression is used, and the whole data if not. That data will be packed in a ECM2 file format, which make it unplayable using an Audio Player program (even if FLAC compression is used). The best for that kind of images is to use an Audio CD ripper which allows you to create FLAC or another format files, which can be easily played on an Audio Player.
+```
+ecm3 -i game.bin --cue game.cue -o game.ecm3
+```
 
-## Why it still in Alpha
+or simply:
 
-I still working in this tool, so the ECM2 format can suffer changes. Also the tool is not extensive tested and there are bugs that must be fixed before remove the Alpha status. Just now I am perfoming several tests, and on those tests I have located two bugs (one of them was critical).
+```
+ecm3 -i game.cue -o game.ecm3
+```
+
+Track metadata (number, mode, pregap, flags, catalog) is embedded in the `.ecm3` file.
+
+### Decode
+
+```
+ecm3 -i game.ecm3 -o game.bin
+```
+
+A `game.cue` file is written automatically next to the output BIN.
+
+### Decode with split tracks
+
+```
+ecm3 -i game.ecm3 -S -o game.bin
+```
+
+Writes `game (Track 01).bin`, `game (Track 02).bin`, … and a multi-FILE `.cue`.
+
+### Split a combined image
+
+```
+ecm3 --split-cue game.cue -o split_output/
+```
+
+Reads the combined `.cue`/`.bin`, writes per-track `.bin` files and a multi-FILE `.cue` to `split_output/`.
+
+### Combine per-track files
+
+```
+ecm3 --combine-cue game.cue -o combined/
+```
+
+Reads the multi-FILE `.cue` and referenced per-track `.bin` files, writes a single `game.bin` + `game.cue` to `combined/`.
+
+### Round-trip guarantee
+
+All CUE split/combine operations are bit-identical round-trip: combining split tracks and re-splitting produces the exact same per-track files, and vice versa.
+
+## Compression Modes
+
+| Mode | Audio | Data | Notes |
+|---|---|---|---|
+| zlib | yes | yes | Fast, good compatibility |
+| LZMA | yes | yes | High ratio, uses X86 BCJ + LZMA2 |
+| LZMA2 | yes | yes | High ratio, no BCJ filter — more deterministic |
+| LZ4 | yes | yes | Very fast, lower ratio |
+| Zstandard | yes | yes | High ratio, tunable speed/ratio via `-c` |
+| FLAC | yes | no | Best ratio for lossless CDDA audio streams |
+| WavPack | yes | no | Lossless CDDA compression; hybrid mode disabled, always lossless |
+
+Recommended settings: `-c 9 -e -a flac -d lzma2`
+
+LZMA2 (without the X86 BCJ filter) is recommended for CD-ROM images because it produces bit-identical output across machines, unlike LZMA which applies a platform-sensitive branch filter.
+
+## Parallel Encoding and Decoding
+
+The `-j`/`--jobs` flag controls how many streams are processed in parallel. The default is `0` (auto-detect all CPU cores). Both encoding and decoding support it.
+
+```
+ecm3 -i game.bin -a flac -d lzma -j 0    # use all cores (default)
+ecm3 -i game.bin -a flac -d lzma -j 1    # single-threaded
+ecm3 -i game.bin -a flac -d lzma -j 4    # four streams at once
+ecm3 -i game.ecm3 -j 2                   # parallel decode
+```
+
+Each stream is compressed or decompressed independently — stream N's output never depends on stream M. Results are assembled in fixed stream order, so the `.ecm3` file is **bit-identical** whether you use `-j 1` on a single-core machine or `-j 16` on a 16-core machine. The same applies to decoding.
+
+Large images are handled without excessive memory: parallel decode streams to temporary files, then concatenates and computes EDC in a single pass.
+
+## Building
+
+### Windows (CLI)
+
+```
+powershell -File build.ps1 -Static        # release
+powershell -File build.ps1 -Static -Debug  # debug
+```
+
+Required static libraries: zlib, FLAC, liblzma, WavPack (all in-tree). The build script auto-detects library format (ELF vs PE) and rebuilds from source if needed.
+
+### Windows (GUI)
+
+Requires [MSYS2 MinGW64](https://www.msys2.org/) with wxWidgets 3.2+ installed:
+
+```
+pacman -S mingw-w64-x86_64-wxWidgets
+```
+
+Then from PowerShell:
+
+```
+powershell -File build_gui.ps1 -Static
+```
+
+MSYS2 MinGW64 g++ 16.1.0+ is required (system g++ 14.2.0 has a C++ ABI mismatch with MSYS2 wxWidgets DLLs).
+
+Produces `release/win64_gui/ecm3-gui.exe` (fully static, ~9.8 MB).
+
+### Linux (CLI)
+
+```
+./build.sh                        # release (dynamic linking)
+STATIC=1 ./build.sh               # fully static binary
+DEBUG=1 ./build.sh                # debug build
+JOBS=8 ./build.sh                 # override parallel jobs
+```
+
+### Linux (GUI)
+
+```
+./build_gui.sh                     # dynamic linking (requires wxWidgets)
+STATIC=1 ./build_gui.sh            # fully static (requires wx-config-static)
+```
+
+## File Format
+
+ECM3 files use the `.ecm3` extension. The format stores error-coded sector data in compressed streams with a table-of-contents for random access, and optional metadata blocks for track information. No filenames are stored in the format — only sector-level content and structure — so two users with identical disc content but different filenames will produce identical `.ecm3` files. Files created by older ECM2-format tools (`.ecm2`) are not compatible — use the original ecmtool to decode those first.
+
+## For Danixu's [Original Readme is referenced here](README_original.md).
+For detailed information on changes made, please see the [Changelog](CHANGELOG.md).
+
+## License
+
+ecm3 is free software released under the **GNU Affero General Public License, version 3 or later**.
+
+New source files are © 2026 Edward Sloter and licensed under AGPLv3. Modified original files retain the GPLv3 license of the original ecmtool project by Daniel Carrasco, with modifications © 2026 Edward Sloter additionally offered under AGPLv3 as permitted by GPLv3 §13.
+
+See [LICENSE](LICENSE) (AGPLv3) and [LICENSE.GPLv3](LICENSE.GPLv3) (GPLv3, original ecmtool code).

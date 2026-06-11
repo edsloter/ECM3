@@ -1,4 +1,4 @@
-COMP_OPT=-ffunction-sections -Wl,-gc-sections -Izlib -Ixz/src/liblzma/api/ -Lxz/src/liblzma/.libs/ -Lzlib -Ilz4/lib/ -Ilzlib4 -Iflaczlib -Iflac/include
+COMP_OPT=-ffunction-sections -Wl,-gc-sections -Izlib -Ixz/src/liblzma/api/ -Lxz/src/liblzma/.libs/ -Lzlib -Ilz4/lib/ -Ilzlib4 -Iflaczlib -Iflac/include -Izstd/lib -Izstd/lib/common
 COMP_OPT_LINUX=
 
 ifeq ($(ECM_DEBUG), true)
@@ -33,7 +33,7 @@ ecmtool:
 
 	# Compile the Linux release
 	mkdir -p release/linux
-	g++ ${COMP_OPT} ${COMP_OPT_LINUX} -o release/linux/$@ ecmtool.cpp compressor.cpp sector_tools.cpp -lzlinux -llzma lz4/lib/lz4hc.c lz4/lib/lz4.c lzlib4/lzlib4.cpp flaczlib/flaczlib.cpp flac/src/libFLAC/.libs/libFLAC-static.a
+	g++ ${COMP_OPT} ${COMP_OPT_LINUX} -o release/linux/$@ ecmtool.cpp compressor.cpp sector_tools.cpp cuesplit.cpp -lzlinux -llzma lz4/lib/lz4hc.c lz4/lib/lz4.c lzlib4/lzlib4.cpp flaczlib/flaczlib.cpp flac/src/libFLAC/.libs/libFLAC-static.a zstd/lib/common/zstd_common.c zstd/lib/common/error_private.c zstd/lib/common/entropy_common.c zstd/lib/common/fse_decompress.c zstd/lib/common/xxhash.c zstd/lib/common/pool.c zstd/lib/common/threading.c zstd/lib/compress/fse_compress.c zstd/lib/compress/hist.c zstd/lib/compress/huf_compress.c zstd/lib/compress/zstd_compress.c zstd/lib/compress/zstd_compress_literals.c zstd/lib/compress/zstd_compress_sequences.c zstd/lib/compress/zstd_compress_superblock.c zstd/lib/compress/zstd_double_fast.c zstd/lib/compress/zstd_fast.c zstd/lib/compress/zstd_lazy.c zstd/lib/compress/zstd_ldm.c zstd/lib/compress/zstd_opt.c zstd/lib/decompress/huf_decompress.c zstd/lib/decompress/zstd_ddict.c zstd/lib/decompress/zstd_decompress.c zstd/lib/decompress/zstd_decompress_block.c zstd/lib/dictBuilder/zdict.c zstd/lib/dictBuilder/cover.c zstd/lib/dictBuilder/divsufsort.c zstd/lib/dictBuilder/fastcover.c
 
 	########## ZLIB CLEAN ##########
 	# Clean the zlib directory at end
@@ -74,7 +74,7 @@ ecmtool.exe:
 
 	# Compile the Win64 release
 	mkdir -p release/win64
-	x86_64-w64-mingw32-g++ ${COMP_OPT} -static -o release/win64/$@ ecmtool.cpp compressor.cpp sector_tools.cpp -lzwindows -llzma lz4/lib/lz4hc.c lz4/lib/lz4.c lzlib4/lzlib4.cpp flaczlib/flaczlib.cpp flac/src/libFLAC/.libs/libFLAC-static.a
+	x86_64-w64-mingw32-g++ ${COMP_OPT} -static -o release/win64/$@ ecmtool.cpp compressor.cpp sector_tools.cpp cuesplit.cpp -lzwindows -llzma lz4/lib/lz4hc.c lz4/lib/lz4.c lzlib4/lzlib4.cpp flaczlib/flaczlib.cpp flac/src/libFLAC/.libs/libFLAC-static.a zstd/lib/common/zstd_common.c zstd/lib/common/error_private.c zstd/lib/common/entropy_common.c zstd/lib/common/fse_decompress.c zstd/lib/common/xxhash.c zstd/lib/common/pool.c zstd/lib/common/threading.c zstd/lib/compress/fse_compress.c zstd/lib/compress/hist.c zstd/lib/compress/huf_compress.c zstd/lib/compress/zstd_compress.c zstd/lib/compress/zstd_compress_literals.c zstd/lib/compress/zstd_compress_sequences.c zstd/lib/compress/zstd_compress_superblock.c zstd/lib/compress/zstd_double_fast.c zstd/lib/compress/zstd_fast.c zstd/lib/compress/zstd_lazy.c zstd/lib/compress/zstd_ldm.c zstd/lib/compress/zstd_opt.c zstd/lib/decompress/huf_decompress.c zstd/lib/decompress/zstd_ddict.c zstd/lib/decompress/zstd_decompress.c zstd/lib/decompress/zstd_decompress_block.c zstd/lib/dictBuilder/zdict.c zstd/lib/dictBuilder/cover.c zstd/lib/dictBuilder/divsufsort.c zstd/lib/dictBuilder/fastcover.c
 
 	########## ZLIB CLEAN ##########
 	# Clean the zlib directory at end

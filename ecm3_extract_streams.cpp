@@ -1,15 +1,28 @@
-/**
- * @file ecmtool_extract_streams.cpp
- * @author Daniel Carrasco (www.electrosoftcloud.com)
- * @brief This tool is intended to extract the compressed streams to debug the compression methods
- * @version 1.0
- * @date 2021-07-25
- * 
- * @copyright Copyright (c) 2021
- * 
- */
+/*******************************************************************************
+ *
+ * ecm3 — Enhanced ECM (Error Code Modeler) for CD-ROM images
+ * Copyright (C) 2026 Edward Sloter
+ *
+ * Based on the original ECM by Neill Corlett and the ecmtool project by
+ * Daniel Carrasco (https://www.electrosoftcloud.com).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ ******************************************************************************/
 
 #include "sector_tools.h"
+#include "decompress_header.h"
 #include <getopt.h>
 #include <stdbool.h>
 #include <string>
@@ -44,12 +57,6 @@ struct SEC_STR_SIZE {
 void print_help();
 static int8_t extract(const char* infilename);
 
-int decompress_header (
-    uint8_t* dest,
-    uint32_t &destLen,
-    uint8_t* source,
-    uint32_t sourceLen
-);
 static void resetcounter(off_t total);
 static void decode_progress(void);
 static void setcounter_decode(off_t n);
@@ -84,7 +91,7 @@ int main(int argc, char** argv) {
     // Decode
     bool decode = false;
 
-    // temporal variables for options parsing
+    // temporary variables for options parsing
     uint64_t temp_argument = 0;
     const char *errstr;
 
@@ -126,11 +133,11 @@ int main(int argc, char** argv) {
             (fgetc(in) == 'M') &&
             (fgetc(in) == 0x02)
         ) {
-            printf("ECM2 file detected. I will continue.\n");
+            printf("ECM3 file detected. I will continue.\n");
             fclose(in);
         }
         else {
-            printf("The input file is not an ECM2 file...\n");
+            printf("The input file is not an ECM3 file...\n");
             fclose(in);
             return 1;
         }
@@ -214,7 +221,7 @@ static int8_t extract(const char* infilename) {
     }
 
     // Write the header to a file
-    FILE * output_header = fopen("ecm2_headers.bin", "wb");
+    FILE * output_header = fopen("ecm3_headers.bin", "wb");
     uint8_t header[5];
     header[0] = 'E';
     header[1] = 'C';
@@ -234,8 +241,8 @@ static int8_t extract(const char* infilename) {
     fclose(output_header);
 
     // Output files
-    FILE * out_stream_cmp = fopen("ecm2_cmp.bin", "wb");
-    FILE * out_stream_uncmp = fopen("ecm2_uncmp.bin", "wb");
+    FILE * out_stream_cmp = fopen("ecm3_cmp.bin", "wb");
+    FILE * out_stream_uncmp = fopen("ecm3_uncmp.bin", "wb");
 
     //
     // Current sector type (run)
@@ -267,7 +274,7 @@ static int8_t extract(const char* infilename) {
 
         size_t stream_left = streams_toc[streams_toc_actual].out_end_position - ftello(in);
         size_t buffer_left = 0;
-        // Read until stream is fully readed
+        // Read until stream is fully read
         while (stream_left || buffer_left) {
             if (feof(in)){
                 printf("Unexpected EOF detected.\n");
@@ -283,7 +290,7 @@ static int8_t extract(const char* infilename) {
                 size_t position = BUFFER_SIZE - buffer_left;
                 memmove(decomp_buffer, decomp_buffer + position, buffer_left);
 
-                // Calculate how much data can be readed
+                // Calculate how much data can be read
                 size_t to_read = BUFFER_SIZE - buffer_left;
                 // If available space is bigger than data in stream, read only the stream data
                 if (to_read > stream_left) {
@@ -316,12 +323,14 @@ static int8_t extract(const char* infilename) {
             // Zlib/LZMA/LZ4 compression
             case C_ZLIB:
             case C_LZMA:
+            case C_LZMA2:
             case C_LZ4:
                 {
                     size_t decompress_buffer_left = 0;
-                    uint8_t * output = (uint8_t *) malloc(DECOMPRESS_CHUNK_SIZE);
+                    size_t out_size = DECOMPRESS_CHUNK_SIZE;
+                    uint8_t* output = (uint8_t*)malloc(out_size);
                     // Decompress the sector data
-                    decompobj -> decompress(output, DECOMPRESS_CHUNK_SIZE, decompress_buffer_left, Z_SYNC_FLUSH);
+                    decompobj->decompress(output, out_size, decompress_buffer_left, Z_SYNC_FLUSH);
                     size_t decompressed = DECOMPRESS_CHUNK_SIZE - decompobj->data_left_out();
                     fwrite(output, decompressed, 1, out_stream_uncmp);
                     free(output);
@@ -364,7 +373,7 @@ void print_help() {
     printf(
         "Usage:\n"
         "\n"
-        "ecmtool_extract_streams -i/--input cdimagefile\n"
+        "ecm3_extract_streams -i/--input cdimagefile\n"
     );
 }
 
@@ -387,33 +396,4 @@ static void setcounter_decode(off_t n) {
     int8_t p = ((n >> 20) != (mycounter_decode >> 20));
     mycounter_decode = n;
     if(p) { decode_progress(); }
-}
-
-int decompress_header (
-    uint8_t* dest,
-    uint32_t &destLen,
-    uint8_t* source,
-    uint32_t sourceLen
-) {
-    z_stream strm;
-    int err;
-
-    strm.zalloc = Z_NULL;
-    strm.zfree = Z_NULL;
-    strm.opaque = Z_NULL;
-    err = inflateInit(&strm);
-    if (err != Z_OK) return err;
-
-    strm.next_out = dest;
-    strm.avail_out = destLen;
-    strm.next_in = source;
-    strm.avail_in = sourceLen;
-
-    err = inflate(&strm, Z_NO_FLUSH);
-    inflateEnd(&strm);
-
-    return err == Z_STREAM_END ? Z_OK :
-           err == Z_NEED_DICT ? Z_DATA_ERROR  :
-           err == Z_BUF_ERROR && strm.avail_out ? Z_DATA_ERROR :
-           err;
 }

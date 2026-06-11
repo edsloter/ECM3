@@ -1,9 +1,9 @@
 [submodule "zlib"]
 	path = zlib
-	url = https://github.com/Danixu/zlib.git
+	url = https://github.com/madler/zlib.git
 [submodule "xz"]
 	path = xz
-	url = https://git.tukaani.org/xz.git
+	url = https://github.com/tukaani-project/xz.git
 [submodule "lz4"]
 	path = lz4
 	url = https://github.com/lz4/lz4.git
@@ -16,3 +16,9 @@
 [submodule "flaczlib"]
 	path = flaczlib
 	url = https://github.com/Danixu/flaczlib.git
+[submodule "zstd"]
+	path = zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "wavpack"]
+	path = wavpack
+	url = https://github.com/dbry/WavPack.git

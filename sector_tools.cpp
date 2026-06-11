@@ -1,7 +1,8 @@
 /*******************************************************************************
- * 
- * Created by Daniel Carrasco at https://www.electrosoftcloud.com
- * 
+ *
+ * Original work by Daniel Carrasco at https://www.electrosoftcloud.com
+ * Modifications copyright (C) 2026 Edward Sloter
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -13,15 +14,15 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  ******************************************************************************/
 
 #include "sector_tools.h"
 
 sector_tools::sector_tools() {
-    // Class initialzer
     eccedc_init();
+    edc_combine_init();
 }
 
 sector_tools_types sector_tools::detect(uint8_t* sector) {
@@ -81,7 +82,7 @@ sector_tools_types sector_tools::detect(uint8_t* sector) {
             if(
                 ecc_checksector(
                     zeroaddress,
-                    sector + 0x010,
+                    sector + 0x10,
                     sector + 0x81C
                 ) &&
                 edc_compute(0, sector + 0x010, 0x808) == get32lsb(sector + 0x818)
@@ -165,6 +166,29 @@ bool sector_tools::is_gap(uint8_t *sector, uint16_t length) {
 
 
 ////////////////////////////////////////////////////////////////////////////////
+uint64_t sector_tools::get64lsb(const uint8_t* src) {
+    return
+        ((uint64_t)(src[0]))        |
+        ((uint64_t)(src[1]) <<  8)  |
+        ((uint64_t)(src[2]) << 16)  |
+        ((uint64_t)(src[3]) << 24)  |
+        ((uint64_t)(src[4]) << 32)  |
+        ((uint64_t)(src[5]) << 40)  |
+        ((uint64_t)(src[6]) << 48)  |
+        ((uint64_t)(src[7]) << 56);
+}
+
+void sector_tools::put64lsb(uint8_t* dest, uint64_t value) {
+    dest[0] = (uint8_t)(value      );
+    dest[1] = (uint8_t)(value >>  8);
+    dest[2] = (uint8_t)(value >> 16);
+    dest[3] = (uint8_t)(value >> 24);
+    dest[4] = (uint8_t)(value >> 32);
+    dest[5] = (uint8_t)(value >> 40);
+    dest[6] = (uint8_t)(value >> 48);
+    dest[7] = (uint8_t)(value >> 56);
+}
+
 uint32_t sector_tools::get32lsb(const uint8_t* src) {
     return
         (((uint32_t)(src[0])) <<  0) |
@@ -179,6 +203,80 @@ void sector_tools::put32lsb(uint8_t* dest, uint32_t value) {
     dest[2] = (uint8_t)(value >> 16);
     dest[3] = (uint8_t)(value >> 24);
 }
+
+uint16_t sector_tools::get16lsb(const uint8_t* src) {
+    return
+        (((uint16_t)(src[0])) << 0) |
+        (((uint16_t)(src[1])) << 8);
+}
+
+void sector_tools::put16lsb(uint8_t* dest, uint16_t value) {
+    dest[0] = (uint8_t)(value      );
+    dest[1] = (uint8_t)(value >>  8);
+}
+
+uint32_t sector_tools::edc_combine_table[32][32];
+bool sector_tools::edc_combine_initialized = false;
+
+static uint32_t compute_edc_byte(uint8_t val) {
+    uint32_t edc = val;
+    for (int j = 0; j < 8; j++) {
+        edc = (edc >> 1) ^ (edc & 1 ? 0xD8018001u : 0);
+    }
+    return edc;
+}
+
+static uint32_t gf2_matrix_times(const uint32_t *mat, uint32_t vec) {
+    uint32_t sum = 0;
+    while (vec) {
+        if (vec & 1)
+            sum ^= *mat;
+        vec >>= 1;
+        mat++;
+    }
+    return sum;
+}
+
+static void gf2_matrix_square(uint32_t *square, const uint32_t *mat) {
+    for (int n = 0; n < 32; n++)
+        square[n] = gf2_matrix_times(mat, mat[n]);
+}
+
+void sector_tools::edc_combine_init() {
+    if (edc_combine_initialized) return;
+
+    uint32_t odd[32];
+    for (int n = 0; n < 8; n++)
+        odd[n] = compute_edc_byte(1u << n);
+    for (int n = 8; n < 32; n++)
+        odd[n] = 1u << (n - 8);
+
+    memcpy(edc_combine_table[0], odd, sizeof(odd));
+    for (int k = 1; k < 32; k++)
+        gf2_matrix_square(edc_combine_table[k], edc_combine_table[k - 1]);
+
+    edc_combine_initialized = true;
+}
+
+uint32_t sector_tools::edc_combine(uint32_t edc1, uint32_t edc2, uint64_t len2) {
+    if (!edc_combine_initialized)
+        edc_combine_init();
+
+    if (len2 == 0)
+        return edc1 ^ edc2;
+
+    uint32_t shifted = edc1;
+    int k = 0;
+    while (len2) {
+        if (len2 & 1)
+            shifted = gf2_matrix_times(edc_combine_table[k], shifted);
+        len2 >>= 1;
+        k++;
+    }
+    return shifted ^ edc2;
+}
+
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -196,6 +294,15 @@ void sector_tools::eccedc_init(void) {
         }
         edc_lut[i] = edc;
     }
+    for(i = 0; i < 256; i++) {
+        edc_lut1[i] = (edc_lut[i] >> 8) ^ edc_lut[edc_lut[i] & 0xFF];
+    }
+    for(i = 0; i < 256; i++) {
+        edc_lut2[i] = (edc_lut1[i] >> 8) ^ edc_lut[edc_lut1[i] & 0xFF];
+    }
+    for(i = 0; i < 256; i++) {
+        edc_lut3[i] = (edc_lut2[i] >> 8) ^ edc_lut[edc_lut2[i] & 0xFF];
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -207,6 +314,13 @@ uint32_t sector_tools::edc_compute(
     const uint8_t* src,
     size_t size
 ) {
+    while (size >= 4) {
+        uint32_t d = edc ^ get32lsb(src);
+        src += 4;
+        size -= 4;
+        edc = edc_lut3[d & 0xFF] ^ edc_lut2[(d >> 8) & 0xFF] ^
+              edc_lut1[(d >> 16) & 0xFF] ^ edc_lut[d >> 24];
+    }
     for(; size; size--) {
         edc = (edc >> 8) ^ edc_lut[(edc ^ (*src++)) & 0xFF];
     }
@@ -219,23 +333,22 @@ uint32_t sector_tools::edc_compute(
 // Check ECC block (either P or Q)
 // Returns true if the ECC data is an exact match
 //
-int8_t sector_tools::ecc_checkpq(
+void sector_tools::ecc_computepq(
     const uint8_t* address,
     const uint8_t* data,
     size_t major_count,
     size_t minor_count,
     size_t major_mult,
     size_t minor_inc,
-    const uint8_t* ecc
+    uint8_t* ecc_a_out,
+    uint8_t* ecc_b_out
 ) {
     size_t size = major_count * minor_count;
-    size_t major;
-    for(major = 0; major < major_count; major++) {
+    for(size_t major = 0; major < major_count; major++) {
         size_t index = (major >> 1) * major_mult + (major & 1);
         uint8_t ecc_a = 0;
         uint8_t ecc_b = 0;
-        size_t minor;
-        for(minor = 0; minor < minor_count; minor++) {
+        for(size_t minor = 0; minor < minor_count; minor++) {
             uint8_t temp;
             if(index < 4) {
                 temp = address[index];
@@ -249,10 +362,28 @@ int8_t sector_tools::ecc_checkpq(
             ecc_a = ecc_f_lut[ecc_a];
         }
         ecc_a = ecc_b_lut[ecc_f_lut[ecc_a] ^ ecc_b];
-        if(
-            ecc[major              ] != (ecc_a        ) ||
-            ecc[major + major_count] != (ecc_a ^ ecc_b)
-        ) {
+        ecc_a_out[major] = ecc_a;
+        ecc_b_out[major] = ecc_a ^ ecc_b;
+    }
+}
+
+
+int8_t sector_tools::ecc_checkpq(
+    const uint8_t* address,
+    const uint8_t* data,
+    size_t major_count,
+    size_t minor_count,
+    size_t major_mult,
+    size_t minor_inc,
+    const uint8_t* ecc
+) {
+    uint8_t ecc_a_buf[86];
+    uint8_t ecc_b_buf[86];
+    if (major_count > 86) return 0;
+    ecc_computepq(address, data, major_count, minor_count, major_mult, minor_inc, ecc_a_buf, ecc_b_buf);
+    for(size_t major = 0; major < major_count; major++) {
+        if(ecc[major              ] != ecc_a_buf[major] ||
+           ecc[major + major_count] != ecc_b_buf[major]) {
             return 0;
         }
     }
@@ -272,29 +403,13 @@ void sector_tools::ecc_writepq(
     size_t minor_inc,
     uint8_t* ecc
 ) {
-    size_t size = major_count * minor_count;
-    size_t major;
-    for(major = 0; major < major_count; major++) {
-        size_t index = (major >> 1) * major_mult + (major & 1);
-        uint8_t ecc_a = 0;
-        uint8_t ecc_b = 0;
-        size_t minor;
-        for(minor = 0; minor < minor_count; minor++) {
-            uint8_t temp;
-            if(index < 4) {
-                temp = address[index];
-            } else {
-                temp = data[index - 4];
-            }
-            index += minor_inc;
-            if(index >= size) { index -= size; }
-            ecc_a ^= temp;
-            ecc_b ^= temp;
-            ecc_a = ecc_f_lut[ecc_a];
-        }
-        ecc_a = ecc_b_lut[ecc_f_lut[ecc_a] ^ ecc_b];
-        ecc[major              ] = (ecc_a        );
-        ecc[major + major_count] = (ecc_a ^ ecc_b);
+    uint8_t ecc_a_buf[86];
+    uint8_t ecc_b_buf[86];
+    if (major_count > 86) return;
+    ecc_computepq(address, data, major_count, minor_count, major_mult, minor_inc, ecc_a_buf, ecc_b_buf);
+    for(size_t major = 0; major < major_count; major++) {
+        ecc[major              ] = ecc_a_buf[major];
+        ecc[major + major_count] = ecc_b_buf[major];
     }
 }
 
@@ -337,29 +452,18 @@ int8_t sector_tools::write_type_count(
     uint32_t count,
     uint8_t& generated_bytes
 ) {
-    generated_bytes = 0; // We will set the generated_bytes counter to 0
-
-    // Generating the first byte wich contains the type and a number up to 15
-    // First bit is used as a "more exists" mark
+    generated_bytes = 0;
     outBuffer[generated_bytes] = ((count >= 8) << 7) | ((count & 7) << 4) | type;
-    generated_bytes++; // Now we are in position 1
-
-    count >>= 3; // We will shift the counter 3 positions to right (same as divide by 8)
-
-    // While the counter is not 0
+    generated_bytes++;
+    count >>= 3;
     while(count) {
         outBuffer[generated_bytes] = ((count >= 128) << 7) | (count & 127);
-        generated_bytes++; // one more byte
-
-        count >>= 7; // same as divide by 128
+        generated_bytes++;
+        count >>= 7;
     }
-    //
-    // Success
-    //
     return 0;
 }
 
-// write for stream type and count
 int8_t sector_tools::write_stream_type_count(
     uint8_t* outBuffer,
     sector_tools_compression compression,
@@ -367,26 +471,15 @@ int8_t sector_tools::write_stream_type_count(
     uint32_t count,
     uint8_t& generated_bytes
 ) {
-    generated_bytes = 0; // We will set the generated_bytes counter to 0
-
-    // Generating the first byte wich contains the type, the compression and a number up to 8
-    // First bit is used as a "continue" mark
+    generated_bytes = 0;
     outBuffer[generated_bytes] = ((count >= 8) << 7) | ((count & 7) << 4) | ((uint8_t)compression << 1) | ((uint8_t)type - 1);
-
-    generated_bytes++; // Now we are in position 1
-
-    count >>= 3; // We will shift the counter 5 positions to right (same as divide by 32)
-
-    // While the counter is not 0
+    generated_bytes++;
+    count >>= 3;
     while(count) {
         outBuffer[generated_bytes] = ((count >= 128) << 7) | (count & 127);
-        generated_bytes++; // one more byte
-
-        count >>= 7; // same as divide by 128
+        generated_bytes++;
+        count >>= 7;
     }
-    //
-    // Success
-    //
     return 0;
 }
 
@@ -490,7 +583,7 @@ void sector_tools::sector_to_time(
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Remove non required data from a sector depending of options
+// Remove non-required data from a sector depending on options
 //
 // Returns nonzero on error
 //
@@ -770,13 +863,13 @@ int8_t sector_tools::regenerate_sector_cdda(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
     // CDDA are directly copied
     if (type == STT_CDDA || !(options & OO_REMOVE_GAP)) {
         memcpy(out, sector, 2352);
-        bytes_readed = 2352;
+        bytes_read = 2352;
     }
     else {
         memset(out, 0x00, 2352);
@@ -791,13 +884,13 @@ int8_t sector_tools::regenerate_sector_mode1(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {    
     // Mode bytes
     if (!(options & OO_REMOVE_MODE)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x01);
-        bytes_readed += 0x01;
+        memcpy(out + current_pos, sector + bytes_read, 0x01);
+        bytes_read += 0x01;
     }
     else {
         out[current_pos] = 0x01;
@@ -805,8 +898,8 @@ int8_t sector_tools::regenerate_sector_mode1(
     current_pos += 0x01;
     // Data bytes
     if (type == STT_MODE1 || type == STT_MODE1_RAW || !(options & OO_REMOVE_GAP)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x800);
-        bytes_readed += 0x800;
+        memcpy(out + current_pos, sector + bytes_read, 0x800);
+        bytes_read += 0x800;
     }
     else {
         memset(out + current_pos, 0x00, 0x800);
@@ -814,8 +907,8 @@ int8_t sector_tools::regenerate_sector_mode1(
     current_pos += 0x800;
     // EDC bytes
     if (!(options & OO_REMOVE_EDC) || type == STT_MODE1_RAW) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x04);
-        bytes_readed += 0x04;
+        memcpy(out + current_pos, sector + bytes_read, 0x04);
+        bytes_read += 0x04;
     }
     else {
         put32lsb(out + current_pos, edc_compute(0, out     , 0x810));
@@ -823,8 +916,8 @@ int8_t sector_tools::regenerate_sector_mode1(
     current_pos += 0x04;
     // Zeroed bytes
     if (!(options & OO_REMOVE_BLANKS)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x08);
-        bytes_readed += 0x08;
+        memcpy(out + current_pos, sector + bytes_read, 0x08);
+        bytes_read += 0x08;
     }
     else {
         memset(out + current_pos, 0x00, 0x08);
@@ -832,8 +925,8 @@ int8_t sector_tools::regenerate_sector_mode1(
     current_pos += 0x08;
     // ECC bytes
     if (!(options & OO_REMOVE_ECC) || type == STT_MODE1_RAW) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x114);
-        bytes_readed += 0x114;
+        memcpy(out + current_pos, sector + bytes_read, 0x114);
+        bytes_read += 0x114;
     }
     else {
         ecc_writesector(out + 0xC, out + 0x10, out + current_pos);
@@ -849,13 +942,13 @@ int8_t sector_tools::regenerate_sector_mode2(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
     // Mode bytes
     if (!(options & OO_REMOVE_MODE)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x01);
-        bytes_readed += 0x01;
+        memcpy(out + current_pos, sector + bytes_read, 0x01);
+        bytes_read += 0x01;
     }
     else {
         out[current_pos] = 0x02;
@@ -863,8 +956,8 @@ int8_t sector_tools::regenerate_sector_mode2(
     current_pos += 0x01;
     // Data bytes
     if (type == STT_MODE2 || !(options & OO_REMOVE_GAP)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x920);
-        bytes_readed += 0x920;
+        memcpy(out + current_pos, sector + bytes_read, 0x920);
+        bytes_read += 0x920;
     }
     else {
         memset(out + current_pos, 0x00, 0x920);
@@ -880,13 +973,13 @@ int8_t sector_tools::regenerate_sector_mode2_xa1(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
     // Mode bytes
     if (!(options & OO_REMOVE_MODE)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x01);
-        bytes_readed += 0x01;
+        memcpy(out + current_pos, sector + bytes_read, 0x01);
+        bytes_read += 0x01;
     }
     else {
         out[current_pos] = 0x02;
@@ -894,12 +987,12 @@ int8_t sector_tools::regenerate_sector_mode2_xa1(
     current_pos += 0x01;
     // Flags bytes
     if (!(options & OO_REMOVE_REDUNDANT_FLAG)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x08);
-        bytes_readed += 0x08;
+        memcpy(out + current_pos, sector + bytes_read, 0x08);
+        bytes_read += 0x08;
     }
     else {
-        memcpy(out + current_pos, sector + bytes_readed, 0x04);
-        bytes_readed += 0x04;
+        memcpy(out + current_pos, sector + bytes_read, 0x04);
+        bytes_read += 0x04;
         out[current_pos + 4] = out[current_pos];
         out[current_pos + 5] = out[current_pos + 1];
         out[current_pos + 6] = out[current_pos + 2];
@@ -908,8 +1001,8 @@ int8_t sector_tools::regenerate_sector_mode2_xa1(
     current_pos += 0x08;
     // Data bytes
     if (type == STT_MODE2_1 || !(options & OO_REMOVE_GAP)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x800);
-        bytes_readed += 0x800;
+        memcpy(out + current_pos, sector + bytes_read, 0x800);
+        bytes_read += 0x800;
     }
     else {
         memset(out + current_pos, 0x00, 0x800);
@@ -917,8 +1010,8 @@ int8_t sector_tools::regenerate_sector_mode2_xa1(
     current_pos += 0x800;
     // EDC bytes
     if (!(options & OO_REMOVE_EDC)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x04);
-        bytes_readed += 0x04;
+        memcpy(out + current_pos, sector + bytes_read, 0x04);
+        bytes_read += 0x04;
     }
     else {
         put32lsb(out + current_pos, edc_compute(0, out + 0x10, 0x808));
@@ -926,8 +1019,8 @@ int8_t sector_tools::regenerate_sector_mode2_xa1(
     current_pos += 0x04;
     // ECC bytes
     if (!(options & OO_REMOVE_ECC)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x114);
-        bytes_readed += 0x114;
+        memcpy(out + current_pos, sector + bytes_read, 0x114);
+        bytes_read += 0x114;
     }
     else {
         ecc_writesector(zeroaddress, out + 0x10, out + current_pos);
@@ -943,13 +1036,13 @@ int8_t sector_tools::regenerate_sector_mode2_xa2(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
     // Mode bytes
     if (!(options & OO_REMOVE_MODE)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x01);
-        bytes_readed += 0x01;
+        memcpy(out + current_pos, sector + bytes_read, 0x01);
+        bytes_read += 0x01;
     }
     else {
         out[current_pos] = 0x02;
@@ -957,12 +1050,12 @@ int8_t sector_tools::regenerate_sector_mode2_xa2(
     current_pos += 0x01;
     // Flags bytes
     if (!(options & OO_REMOVE_REDUNDANT_FLAG)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x08);
-        bytes_readed += 0x08;
+        memcpy(out + current_pos, sector + bytes_read, 0x08);
+        bytes_read += 0x08;
     }
     else {
-        memcpy(out + current_pos, sector + bytes_readed, 0x04);
-        bytes_readed += 0x04;
+        memcpy(out + current_pos, sector + bytes_read, 0x04);
+        bytes_read += 0x04;
         out[current_pos + 4] = out[current_pos];
         out[current_pos + 5] = out[current_pos + 1];
         out[current_pos + 6] = out[current_pos + 2];
@@ -971,8 +1064,8 @@ int8_t sector_tools::regenerate_sector_mode2_xa2(
     current_pos += 0x08;
     // Data bytes
     if (type == STT_MODE2_2 || !(options & OO_REMOVE_GAP)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x914);
-        bytes_readed += 0x914;
+        memcpy(out + current_pos, sector + bytes_read, 0x914);
+        bytes_read += 0x914;
     }
     else {
         memset(out + current_pos, 0x00, 0x914);
@@ -980,8 +1073,8 @@ int8_t sector_tools::regenerate_sector_mode2_xa2(
     current_pos += 0x914;
     // EDC bytes
     if (!(options & OO_REMOVE_EDC)) {
-        memcpy(out + current_pos, sector + bytes_readed, 0x04);
-        bytes_readed += 0x04;
+        memcpy(out + current_pos, sector + bytes_read, 0x04);
+        bytes_read += 0x04;
     }
     else {
         put32lsb(out + current_pos, edc_compute(0, out + 0x10, 0x91C));
@@ -997,13 +1090,13 @@ int8_t sector_tools::regenerate_sector_modex(
     uint8_t* sector,
     sector_tools_types type,
     uint16_t current_pos,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
     // Rest of bytes
-    memcpy(out + current_pos, sector + bytes_readed, 0x921);
+    memcpy(out + current_pos, sector + bytes_read, 0x921);
     current_pos += 0x921;
-    bytes_readed = 0x921;
+    bytes_read = 0x921;
 
     return 0;
 }
@@ -1014,17 +1107,17 @@ int8_t sector_tools::regenerate_sector(
     uint8_t* sector,
     sector_tools_types type,
     uint32_t sector_number,
-    uint16_t& bytes_readed,
+    uint16_t& bytes_read,
     optimization_options options
 ) {
-    bytes_readed = 0;
+    bytes_read = 0;
     uint16_t current_pos = 0;
     // sync and address bytes in data sectors, common to almost all types
     if (type >= STT_MODE1) {
         // SYNC bytes
         if (!(options & OO_REMOVE_SYNC)) {
             memcpy(out, sector, 12);
-            bytes_readed += 0x0C;
+            bytes_read += 0x0C;
         }
         else {
             out[0] = 0x00;
@@ -1034,8 +1127,8 @@ int8_t sector_tools::regenerate_sector(
         current_pos += 0x0C;
         // Address bytes
         if (!(options & OO_REMOVE_MSF)) {
-            memcpy(out + current_pos, sector + bytes_readed, 0x03);
-            bytes_readed += 0x03;
+            memcpy(out + current_pos, sector + bytes_read, 0x03);
+            bytes_read += 0x03;
         }
         else {
             sector_to_time(out + current_pos, sector_number);
@@ -1047,27 +1140,27 @@ int8_t sector_tools::regenerate_sector(
     switch(type) {
         case STT_CDDA:
         case STT_CDDA_GAP:
-            return regenerate_sector_cdda(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_cdda(out, sector, type, current_pos, bytes_read, options);
 
         case STT_MODE1:
         case STT_MODE1_GAP:
         case STT_MODE1_RAW:
-            return regenerate_sector_mode1(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_mode1(out, sector, type, current_pos, bytes_read, options);
 
         case STT_MODE2:
         case STT_MODE2_GAP:
-            return regenerate_sector_mode2(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_mode2(out, sector, type, current_pos, bytes_read, options);
 
         case STT_MODE2_1:
         case STT_MODE2_1_GAP:
-            return regenerate_sector_mode2_xa1(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_mode2_xa1(out, sector, type, current_pos, bytes_read, options);
 
         case STT_MODE2_2:
         case STT_MODE2_2_GAP:
-            return regenerate_sector_mode2_xa2(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_mode2_xa2(out, sector, type, current_pos, bytes_read, options);
 
         case STT_MODEX:
-            return regenerate_sector_modex(out, sector, type, current_pos, bytes_readed, options);
+            return regenerate_sector_modex(out, sector, type, current_pos, bytes_read, options);
     }
 
     return 0;

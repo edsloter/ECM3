@@ -1,7 +1,10 @@
+#pragma once
+
 /*******************************************************************************
- * 
- * Created by Daniel Carrasco at https://www.electrosoftcloud.com
- * 
+ *
+ * Original work by Daniel Carrasco at https://www.electrosoftcloud.com
+ * Modifications copyright (C) 2026 Edward Sloter
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -13,7 +16,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  ******************************************************************************/
 
@@ -23,8 +26,8 @@
 // Sector Detector class
 //
 // This class allows to detect the sector type of a CD-ROM sector
-// From now is only able to detect the following sectors types:
-//   * CDDA: If the sector type is unrecognized, will be threated as raw (like CDDA)
+// From now is only able to detect the following sector types:
+//   * CDDA: If the sector type is unrecognized, will be treated as raw (like CDDA)
 //   * CDDA_GAP: As above sector type, unrecognized type. The difference is that GAP is zeroed
 
 
@@ -159,8 +162,14 @@ class sector_tools {
     public:
         // Public methods
         sector_tools();
+        static uint64_t get64lsb(const uint8_t* src);
+        static void put64lsb(uint8_t* dest, uint64_t value);
         static uint32_t get32lsb(const uint8_t* src);
         static void put32lsb(uint8_t* dest, uint32_t value);
+        static uint16_t get16lsb(const uint8_t* src);
+        static void put16lsb(uint8_t* dest, uint16_t value);
+        static void edc_combine_init();
+        static uint32_t edc_combine(uint32_t edc1, uint32_t edc2, uint64_t len2);
         sector_tools_types detect(uint8_t* sector);
         static sector_tools_stream_types detect_stream(sector_tools_types type);
         uint32_t edc_compute(
@@ -256,7 +265,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         //  sector regenerator Mode 1
@@ -265,7 +274,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         //  sector regenerator Mode 2
@@ -274,7 +283,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         //  sector regenerator Mode 2 XA 1
@@ -283,7 +292,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         //  sector regenerator Mode 2 XA 2
@@ -292,7 +301,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         //  sector regenerator Unknown mode
@@ -301,7 +310,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint16_t current_pos,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         int8_t regenerate_sector(
@@ -309,7 +318,7 @@ class sector_tools {
             uint8_t* sector,
             sector_tools_types type,
             uint32_t sector_number,
-            uint16_t& bytes_readed,
+            uint16_t& bytes_read,
             optimization_options options
         );
         static int8_t encoded_sector_size(
@@ -329,6 +338,16 @@ class sector_tools {
         // Private methods
         bool is_gap(uint8_t *sector, uint16_t length);
         void eccedc_init(void);
+        void ecc_computepq(
+            const uint8_t* address,
+            const uint8_t* data,
+            size_t major_count,
+            size_t minor_count,
+            size_t major_mult,
+            size_t minor_inc,
+            uint8_t* ecc_a_out,
+            uint8_t* ecc_b_out
+        );
         int8_t ecc_checkpq(
             const uint8_t* address,
             const uint8_t* data,
@@ -365,4 +384,9 @@ class sector_tools {
         uint8_t  ecc_f_lut[256];
         uint8_t  ecc_b_lut[256];
         uint32_t edc_lut  [256];
+        uint32_t edc_lut1 [256];
+        uint32_t edc_lut2 [256];
+        uint32_t edc_lut3 [256];
+        static uint32_t edc_combine_table[32][32];
+        static bool edc_combine_initialized;
 };

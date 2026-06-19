@@ -23,11 +23,11 @@
  *
  ******************************************************************************/
 
-#define TITLE "ecm3 v3.0.1.1"
+#define TITLE "ecm3 v3.0.1.6"
 #define COPYR "Update on Error Code Modeler with advanced features"
 #define SUBTL "Based on the original ECM by Neill Corlett, reloaded by Daniel Carrasco."
 #define AUTHR "Copyright (C) 2026 Edward Sloter"
-#define VERSI "3.0.1.1"
+#define VERSI "3.0.1.6"
 
 #include "banner.h"
 #include "sector_tools.h"
@@ -271,6 +271,7 @@ struct ecm_options {
     bool batch_cue_mode = false;
     bool batch_decode_mode = false;
     std::string batch_directory;
+    uint32_t batch_jobs = 0;
     bool delete_source = false;
     std::vector<std::string> delete_paths;
     bool cue_split = false;
@@ -414,6 +415,7 @@ int detect_id_psx(std::string &id, uint8_t *data, uint64_t data_size);
 // Optional GUI progress callback (called from worker thread with 0-100 percent)
 typedef void (*progress_cb_t)(int percent);
 void set_progress_callback(progress_cb_t cb);
+void set_progress_show_cerr(bool show);
 
 /*
 void write_to_file(std::string filename, uint8_t *data, uint64_t size) {

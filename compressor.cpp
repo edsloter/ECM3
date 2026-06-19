@@ -189,8 +189,8 @@ int8_t compressor::set_input(uint8_t* in, size_t &in_size){
             break;
 
         case C_FLAC:
-            strm_flac->strm->avail_in = in_size;
-            strm_flac->strm->next_in = in;
+            strm_flac->strm.avail_in = in_size;
+            strm_flac->strm.next_in = in;
 
             return 0;
             break;
@@ -250,8 +250,8 @@ int8_t compressor::set_output(uint8_t* out, size_t &out_size){
             break;
 
         case C_FLAC:
-            strm_flac->strm->avail_out = out_size;
-            strm_flac->strm->next_out = out;
+            strm_flac->strm.avail_out = out_size;
+            strm_flac->strm.next_out = out;
 
             return 0;
             break;
@@ -391,12 +391,12 @@ int8_t compressor::compress(size_t &out_size, uint8_t* in, size_t in_size, uint8
             break;
 
         case C_FLAC:
-            strm_flac->strm->avail_in = in_size;
-            strm_flac->strm->next_in = in;
+            strm_flac->strm.avail_in = in_size;
+            strm_flac->strm.next_in = in;
 
             strm_flac->compress(in_size / 4, (flaczlib_flush_mode)flush_mode);
 
-            out_size = strm_flac->strm->avail_out;
+            out_size = strm_flac->strm.avail_out;
             break;
 
         case C_ZSTD:
@@ -492,11 +492,11 @@ int8_t compressor::decompress(uint8_t* out, size_t &out_size, size_t &in_size, u
 
         case C_FLAC:
             {
-                strm_flac->strm->avail_out = out_size;
-                strm_flac->strm->next_out = out;
+                strm_flac->strm.avail_out = out_size;
+                strm_flac->strm.next_out = out;
                 int return_code = strm_flac->decompress_partial(false, -1);
 
-                in_size = strm_flac->strm->avail_in;
+                in_size = strm_flac->strm.avail_in;
                 return return_code;
                 break;
             }
@@ -651,7 +651,7 @@ size_t compressor::data_left_in() {
         return strm_lz4->strm.avail_in;
         break;
     case C_FLAC:
-        return strm_flac->strm->avail_in;
+        return strm_flac->strm.avail_in;
         break;
 
     case C_ZSTD:
@@ -684,7 +684,7 @@ size_t compressor::data_left_out() {
         return strm_lz4->strm.avail_out;
         break;
     case C_FLAC:
-        return strm_flac->strm->avail_out;
+        return strm_flac->strm.avail_out;
         break;
 
     case C_ZSTD:

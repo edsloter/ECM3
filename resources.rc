@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDI_ICON1     ICON "ecm3.ico"
+IDI_ECM3FILE ICON "ecm3_files.ico"

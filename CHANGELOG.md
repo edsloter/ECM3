@@ -2,6 +2,93 @@
 
 All notable changes to ecm-tools-reloaded are documented in this file.
 
+## [3.0.1.6] — 2026-06-18
+
+### GUI
+
+- **Batch Split/Combine CUE tab** — New "Batch Split/Combine CUE" tab
+  (Tab 5) recursively processes all `.cue` files in a directory, calling
+  `cue_cmd_split` or `cue_cmd_combine` on each. Uses the same atomic
+  work-stealing thread pool as Batch Encode/Decode with configurable
+  parallel jobs (0=auto). Output directory is required to preserve input
+  files. Includes Force overwrite checkbox.
+
+## [3.0.1.5] — 2026-06-15
+
+### Bug Fixes
+
+- **Batch decode crash under parallel execution** — `signal(SIGSEGV)` does
+  not catch SEH exceptions (access violations, stack overflows) on MinGW
+  Windows, so worker threads crashed silently. Replaced with
+  `AddVectoredExceptionHandler` (Windows) / `signal(SIGSEGV)` fallback
+  (other platforms). Handler calls `longjmp` to a per-thread `jmp_buf` to
+  recover and continue with the next file.
+
+- **FLAC library thread-safety** — Removed the global `flaczlib_stream`
+  from `flaczlib.cpp`. Each `flaczlib` instance owns its own embedded
+  `flaczlib_stream strm` member; all five FLAC C callbacks now receive
+  the instance via `client_data` instead of referencing the global.
+
+### GUI
+
+- **Per-file batch progress** — The progress gauge during batch encode
+  and batch decode now shows `completed_files / total_files * 100`
+  instead of per-file decode percentage, which is meaningless when
+  multiple files are processed in parallel.
+
+## [3.0.1.4] — 2026-06-14
+
+### Features
+
+- **Parallel batch processing** — New `--batch-jobs <n>` flag controls how
+  many batch files (CUE/ECM3) are processed concurrently. In batch mode,
+  `-j` (per-file stream parallelism) is forced to `1` to avoid thread
+  oversubscription; only `--batch-jobs` controls parallelism. Default `0`
+  auto-detects CPU count via `std::thread::hardware_concurrency()`. When
+  `--batch-jobs` is `1`, files are processed sequentially (previous behavior).
+
+### GUI
+
+- **Batch jobs controls** — New "Parallel batch jobs (0=auto)" spin controls
+  on both the Batch Encode and Batch Decode tabs (range 0–64, default 0).
+  Both tabs now use a thread pool with atomic work-stealing when the value
+  is > 1, with mutex-protected log output to prevent interleaving.
+
+## [3.0.1.3] — 2026-06-14
+
+### Bug Fixes
+
+- **Parallel encode CRC mismatch on CUE/BIN images** — When encoding
+  multi-track CUE sheets with `-j 2+`, the CRC (EDC) stored at the end
+  of the ECM data block was incorrect. The `encode_single_stream()`
+  function accumulated `byte_count` as 2352 per sector regardless of
+  the actual EDC size (`edc_size`), which can be 2076 (0x81C) when
+  `OO_REMOVE_ECC` is enabled. This caused `edc_combine()` to shift the
+  partial CRC by the wrong amount, producing a wrong combined CRC that
+  failed verification on decode. Fixed by accumulating the actual
+  `edc_size` per sector instead of hardcoding 2352.
+
+## [3.0.1.2] — 2026-06-13
+
+### Bug Fixes
+
+- **FLAGS not written to CUE on decode** — `write_cue_from_metadata()`
+  omitted `FLAGS DCP/4CH/PRE/SCMS` lines in the reconstructed `.cue`,
+  breaking bit-identical round-trip for CUEs with FLAGS (e.g., Afraid
+  Gear (Japan)). Fixed by adding FLAGS output to both split and combined
+  output paths, matching the existing `write_cue_file()`.
+
+- **Windows icons not showing** — `resources.rc`/`resource.h` existed
+  but were never compiled into the executable in the CLI build
+  (`build.sh`); the GUI build (`build_gui.sh`) referenced the stale
+  `ecm3.rc` with numeric IDs (1, 2) that were never linked. Fixed by
+  compiling `resources.rc` via `windres` in both build scripts and
+  setting icons via `WM_SETICON` with correct resource IDs.
+
+- **File association icon using wrong resource ID** — The registry
+  `DefaultIcon` value used `L",2"` (old `ecm3.rc` numeric ID), now
+  changed to `L",-%d", IDI_ECM3FILE` (200) from `resources.rc`.
+
 ## [3.0.1.1] — 2026-06-10
 
 ### Bug Fixes

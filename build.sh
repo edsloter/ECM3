@@ -120,6 +120,12 @@ OGG_LIB=""
 [ "$PLATFORM" = "windows" ] && [ -f /mingw64/lib/libogg.a ] && OGG_LIB=/mingw64/lib/libogg.a
 [ "$PLATFORM" = "unix" ] && for p in /usr/lib/x86_64-linux-gnu/libogg.a /usr/lib/libogg.a; do [ -f "$p" ] && { OGG_LIB="$p"; break; }; done
 
+# ── Compile .rc (Windows only) ──
+RES=""
+if [ "$PLATFORM" = "windows" ] && command -v windres >/dev/null 2>&1; then
+    windres -O coff resources.rc resources.o && RES="resources.o"
+fi
+
 g++ $OPT_FLAGS \
     -std=c++17 -Wno-deprecated-declarations ${STATIC:+-static} \
     -Izlib -Ixz/src/liblzma/api -Ilz4/lib -Ilzlib4 -Iflaczlib \
@@ -129,6 +135,7 @@ g++ $OPT_FLAGS \
     ecm3.cpp ecm3_core.cpp cue_gen.cpp compressor.cpp sector_tools.cpp cue_parser.cpp cuesplit.cpp \
     lz4/lib/lz4hc.c lz4/lib/lz4.c lzlib4/lzlib4.cpp flaczlib/flaczlib.cpp wavpackzlib/wavpackzlib.cpp \
     $(find zstd/lib -name '*.c' ! -path '*/legacy/*' ! -path '*/deprecated/*') \
+    $RES \
     zlib/libz.a flac/src/libFLAC/libFLAC-static.a xz/build/liblzma.a wavpack/libwavpack.a $OGG_LIB
 
 echo "Build succeeded: $OUTPUT"

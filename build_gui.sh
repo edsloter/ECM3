@@ -127,7 +127,7 @@ done
 # ── Compile .rc (Windows only) ──
 RES=""
 if [ "$PLATFORM" = "windows" ] && command -v windres >/dev/null 2>&1; then
-    windres -O coff ecm3.rc ecm3.o && RES="ecm3.o"
+    windres -O coff resources.rc resources.o && RES="resources.o"
 fi
 
 # ── Compile ──

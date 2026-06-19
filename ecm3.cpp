@@ -33,9 +33,11 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <csignal>
 #include <iomanip>
 #include <functional>
+#include <csetjmp>
 
 #define LZMA_BUF_ERR 10
 
@@ -176,15 +178,38 @@ static sector_tools_compression mycounter_data_compression = C_NONE;
 std::atomic<bool> g_interrupted{false};
 
 static progress_cb_t g_progress_cb = nullptr;
+static std::atomic<bool> g_progress_show_cerr{true};
+static std::mutex g_progress_mutex;
 
 void set_progress_callback(progress_cb_t cb) {
     g_progress_cb = cb;
+}
+
+void set_progress_show_cerr(bool show) {
+    g_progress_show_cerr.store(show, std::memory_order_relaxed);
 }
 static std::string g_output_filename;
 
 
 
 #define CHECK_INTERRUPT() do { if (g_interrupted.load(std::memory_order_relaxed)) { fprintf(stderr, "\nInterrupted.\n"); return ECMTOOL_PROCESSING_ERROR; } } while(0)
+
+static thread_local jmp_buf g_crash_jmpbuf;
+static thread_local int g_crash_recovering = 0;
+
+#ifdef _WIN32
+static PVOID g_veh_handle = nullptr;
+static LONG CALLBACK veh_crash_handler(EXCEPTION_POINTERS* ep) {
+    if (g_crash_recovering)
+        longjmp(g_crash_jmpbuf, 1);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
+static void crash_handler(int) {
+    if (g_crash_recovering)
+        longjmp(g_crash_jmpbuf, 1);
+}
+#endif
 
 static void signal_handler(int sig) {
     g_interrupted.store(true, std::memory_order_relaxed);
@@ -599,6 +624,11 @@ void write_cue_from_metadata(
             cue_file << "  TRACK " << std::setw(2) << std::setfill('0') << (int)entry.track_number
                      << " " << cue_mode_to_string((cue_track_mode)entry.track_mode) << "\r\n";
 
+            if (entry.track_flags & CUE_FLAG_DCP)  cue_file << "    FLAGS DCP\r\n";
+            if (entry.track_flags & CUE_FLAG_4CH)  cue_file << "    FLAGS 4CH\r\n";
+            if (entry.track_flags & CUE_FLAG_PRE)  cue_file << "    FLAGS PRE\r\n";
+            if (entry.track_flags & CUE_FLAG_SCMS) cue_file << "    FLAGS SCMS\r\n";
+
             uint32_t pregap = entry.pregap_sectors;
 
             if (pregap > 0) {
@@ -617,6 +647,11 @@ void write_cue_from_metadata(
 
             cue_file << "  TRACK " << std::setw(2) << std::setfill('0') << (int)entry.track_number
                      << " " << cue_mode_to_string((cue_track_mode)entry.track_mode) << "\r\n";
+
+            if (entry.track_flags & CUE_FLAG_DCP)  cue_file << "    FLAGS DCP\r\n";
+            if (entry.track_flags & CUE_FLAG_4CH)  cue_file << "    FLAGS 4CH\r\n";
+            if (entry.track_flags & CUE_FLAG_PRE)  cue_file << "    FLAGS PRE\r\n";
+            if (entry.track_flags & CUE_FLAG_SCMS) cue_file << "    FLAGS SCMS\r\n";
 
             uint32_t start = entry.start_sector;
 
@@ -718,11 +753,255 @@ static struct option long_options[] = {
     {"help", no_argument, NULL, 'h'},
     {"batch-cue", required_argument, NULL, 3},
     {"batch-decode", required_argument, NULL, 4},
+    {"batch-jobs", required_argument, NULL, 8},
     {"delete-source", no_argument, NULL, 5},
     {"split-cue", required_argument, NULL, 6},
     {"combine-cue", required_argument, NULL, 7},
     {NULL, 0, NULL, 0}
 };
+
+
+struct batch_file_result {
+    std::string filename;
+    int return_code;
+    bool specific_error_printed;
+    bool decode;
+    bool verify;
+    bool split_output;
+    bool delete_source;
+    bool force_rewrite;
+    bool keep_output;
+    track_metadata_header meta_header;
+    std::vector<track_metadata_entry> meta_entries;
+    bool has_metadata;
+    std::vector<std::string> delete_paths;
+    std::chrono::high_resolution_clock::time_point start_time;
+    std::chrono::high_resolution_clock::time_point end_time;
+    bool interrupted;
+    std::string error_message;
+    std::string out_filename;
+};
+
+static batch_file_result process_batch_file(const std::string& in_filename, const ecm_options& base_options, bool batch_cue_mode, bool batch_decode_mode) {
+    ecm_options options = base_options;
+    options.in_filename = in_filename;
+    if (batch_cue_mode || batch_decode_mode) {
+        options.cue_filename = "";
+    }
+
+    batch_file_result result;
+    result.filename = in_filename;
+    result.return_code = 0;
+    result.specific_error_printed = false;
+    result.decode = false;
+    result.verify = options.verify;
+    result.split_output = options.split_output;
+    result.delete_source = options.delete_source;
+    result.force_rewrite = options.force_rewrite;
+    result.keep_output = options.keep_output;
+    result.start_time = std::chrono::high_resolution_clock::now();
+
+    bool decode = false;
+    result.meta_header = track_metadata_header();
+    memset(&result.meta_header, 0, sizeof(result.meta_header));
+    result.meta_entries.clear();
+    result.has_metadata = false;
+    options.delete_paths.clear();
+
+    temp_file temp_concat;
+
+    // When --cue is provided, it is the sole input reference
+    if (!options.cue_filename.empty() && !options.in_filename.empty()) {
+        result.error_message = "WARNING: --cue was specified; ignoring --input/-i (the CUE sheet itself references the BIN files).\n";
+    }
+
+    // Auto-detect if --input has .cue extension
+    if (options.cue_filename.empty() && !options.in_filename.empty()) {
+        std::string ext = std::filesystem::path(options.in_filename).extension().string();
+        if (ext == ".cue" || ext == ".CUE") {
+            cue_sheet auto_cue;
+            if (cue_parse(options.in_filename, auto_cue) == 0 && !auto_cue.file_order.empty()) {
+                std::string cue_dir = get_cue_dir(options.in_filename);
+                std::filesystem::path bin_path = std::filesystem::path(cue_dir) / auto_cue.file_order[0];
+                result.error_message += "CUE file detected, using BIN: " + bin_path.filename().string() + "\n";
+                options.cue_filename = options.in_filename;
+                options.in_filename = bin_path.string();
+            }
+        }
+    }
+
+    // Detect if the file is a ECM3 file
+    if (!options.in_filename.empty()) {
+        std::ifstream tmp_f(options.in_filename.c_str(), std::ios::binary);
+        if (tmp_f.good()) {
+            std::string sig(3, '\0');
+            tmp_f.read(&sig[0], 3);
+            if (sig == "ECM") {
+                decode = true;
+            }
+        }
+    }
+
+    result.decode = decode;
+    cue_sheet parsed_cue;
+    bool has_cue = false;
+
+    // Encoding process
+    if (!decode) {
+        // Auto-detect CUE when input is a .bin
+        if (options.cue_filename.empty()) {
+            namespace fs = std::filesystem;
+            fs::path in_path(options.in_filename);
+            std::string ext = in_path.extension().string();
+            if (ext != ".cue" && ext != ".CUE" && ext != ".ecm3") {
+                fs::path cue_path = in_path;
+                cue_path.replace_extension(".cue");
+                if (fs::exists(cue_path)) {
+                    result.error_message += "Auto-detected CUE: " + cue_path.filename().string() + "\n";
+                    options.cue_filename = cue_path.string();
+                }
+                if (options.cue_filename.empty()) {
+                    fs::path in_dir = in_path.parent_path();
+                    if (in_dir.empty()) in_dir = ".";
+                    std::string in_filename = in_path.filename().string();
+                    std::string in_filename_lower = in_filename;
+                    std::transform(in_filename_lower.begin(), in_filename_lower.end(), in_filename_lower.begin(), ::tolower);
+                    for (auto& entry : fs::directory_iterator(in_dir)) {
+                        if (entry.path().extension() != ".cue") continue;
+                        cue_sheet auto_cue;
+                        if (cue_parse(entry.path().string(), auto_cue) != 0 || auto_cue.file_order.empty())
+                            continue;
+                        for (auto& fname : auto_cue.file_order) {
+                            if (fname == in_filename_lower) {
+                                result.error_message += "Auto-detected CUE: " + entry.path().filename().string() + "\n";
+                                options.cue_filename = entry.path().string();
+                                break;
+                            }
+                        }
+                        if (!options.cue_filename.empty()) break;
+                    }
+                }
+            }
+        }
+
+        // --cue handling: parse cue sheet and optionally concatenate split BINs
+        if (!options.cue_filename.empty()) {
+            if (cue_parse(options.cue_filename, parsed_cue) != 0) {
+                result.error_message += "ERROR: Failed to parse CUE file: " + options.cue_filename + "\n";
+                result.return_code = 1;
+                result.end_time = std::chrono::high_resolution_clock::now();
+                return result;
+            }
+            has_cue = true;
+
+            std::string cue_dir = get_cue_dir(options.cue_filename);
+
+            if (parsed_cue.file_order.size() > 1) {
+                if (concat_split_bins(parsed_cue, cue_dir, temp_concat) != 0) {
+                    result.return_code = 1;
+                    result.end_time = std::chrono::high_resolution_clock::now();
+                    return result;
+                }
+                options.in_filename = temp_concat.path();
+            } else {
+                options.in_filename = (std::filesystem::path(cue_dir) / parsed_cue.file_order[0]).string();
+            }
+        }
+
+        // Derive output filename from input if not provided
+        if (options.out_filename.empty()) {
+            std::filesystem::path base = has_cue
+                ? std::filesystem::path(options.cue_filename)
+                : std::filesystem::path(options.in_filename);
+            options.out_filename = (base.parent_path() / (base.stem().string() + ".ecm3")).string();
+        } else {
+            std::filesystem::path base = has_cue
+                ? std::filesystem::path(options.cue_filename)
+                : std::filesystem::path(options.in_filename);
+            options.out_filename = (std::filesystem::path(options.out_filename) / (base.stem().string() + ".ecm3")).string();
+        }
+        result.out_filename = options.out_filename;
+
+        // Check if output file already exists
+        if (!options.force_rewrite && std::filesystem::exists(options.out_filename)) {
+            result.error_message += "ERROR: output file already exists. Use -f to overwrite.\n";
+            result.specific_error_printed = true;
+            result.return_code = 1;
+            result.end_time = std::chrono::high_resolution_clock::now();
+            return result;
+        }
+
+        // Call core encode function
+        ecm3_result encode_result;
+        result.return_code = ecm3_encode(options.in_filename, options.out_filename, options,
+                                           has_cue ? &parsed_cue : nullptr, has_cue, encode_result);
+        if (result.return_code == 0) {
+            result.meta_header = encode_result.meta_header;
+            result.meta_entries = encode_result.meta_entries;
+            result.has_metadata = encode_result.has_metadata;
+            result.delete_paths = encode_result.source_paths;
+
+            summary(
+                &encode_result.sectors_type_summary,
+                &options,
+                0,
+                &encode_result.encode_streams_script
+            );
+        }
+        if (result.return_code != 0) {
+            result.end_time = std::chrono::high_resolution_clock::now();
+            return result;
+        }
+    }
+    // Decoding process
+    else {
+        // Derive output filename from input: strip .ecm3, use .bin
+        if (options.out_filename.empty()) {
+            std::string in = options.in_filename;
+            if (in.size() >= 5 && in.substr(in.size() - 5) == ".ecm3") {
+                in.resize(in.size() - 5);
+            }
+            options.out_filename = in + ".bin";
+        } else {
+            std::string in = options.in_filename;
+            if (in.size() >= 5 && in.substr(in.size() - 5) == ".ecm3") {
+                in.resize(in.size() - 5);
+            }
+            options.out_filename = (std::filesystem::path(options.out_filename) / (std::filesystem::path(in).filename().string() + ".bin")).string();
+        }
+        result.out_filename = options.out_filename;
+
+        // Check if output file already exists
+        if (!options.verify && !options.force_rewrite && std::filesystem::exists(options.out_filename)) {
+            result.error_message += "ERROR: output file already exists. Use -f to overwrite.\n";
+            result.specific_error_printed = true;
+            result.return_code = 1;
+            result.end_time = std::chrono::high_resolution_clock::now();
+            return result;
+        }
+
+        // Call core decode function
+        ecm3_result decode_result;
+        result.return_code = ecm3_decode(options.in_filename, options.out_filename, options, decode_result);
+        if (result.return_code == 0) {
+            result.meta_header = decode_result.meta_header;
+            result.meta_entries = decode_result.meta_entries;
+            result.has_metadata = decode_result.has_metadata;
+            result.delete_paths = decode_result.source_paths;
+
+            if (result.has_metadata && !options.verify) {
+                write_cue_from_metadata(result.meta_header, result.meta_entries, result.out_filename, options.split_output);
+            }
+        }
+        if (result.return_code != 0) {
+            result.end_time = std::chrono::high_resolution_clock::now();
+            return result;
+        }
+    }
+
+    result.end_time = std::chrono::high_resolution_clock::now();
+    return result;
+}
 
 
 #ifndef ECM3_GUI
@@ -841,269 +1120,243 @@ int main(int argc, char **argv) {
         batch_files.push_back(options.in_filename);
     }
 
-    int overall_return_code = 0;
-
-    for (size_t file_idx = 0; file_idx < batch_files.size(); file_idx++) {
-        options.in_filename = batch_files[file_idx];
-        if (batch_files.size() > 1) {
-            options.cue_filename = "";
-            options.out_filename = "";
-        }
-        decode = false;
-        specific_error_printed = false;
-        return_code = 0;
-
-        meta_header = track_metadata_header();
-        memset(&meta_header, 0, sizeof(meta_header));
-        meta_entries.clear();
-        has_metadata = false;
-        options.delete_paths.clear();
-
-        start = std::chrono::high_resolution_clock::now();
-
-        if (batch_files.size() > 1) {
-            fprintf(stdout, "\n[%zu/%zu] %s\n", file_idx + 1, batch_files.size(),
-                    std::filesystem::path(batch_files[file_idx]).filename().string().c_str());
-        }
-
-    // When --cue is provided, it is the sole input reference — ignore any -i argument
-    if (!options.cue_filename.empty() && !options.in_filename.empty()) {
-        fprintf(stderr, "WARNING: --cue was specified; ignoring --input/-i (the CUE sheet itself references the BIN files).\n");
-        options.in_filename.clear();
-    }
-
-    // Auto-detect if --input has .cue extension
-    if (options.cue_filename.empty() && !options.in_filename.empty()) {
-        std::string ext = std::filesystem::path(options.in_filename).extension().string();
-        if (ext == ".cue" || ext == ".CUE") {
-            cue_sheet auto_cue;
-            if (cue_parse(options.in_filename, auto_cue) == 0 && !auto_cue.file_order.empty()) {
-                std::string cue_dir = get_cue_dir(options.in_filename);
-                std::filesystem::path bin_path = std::filesystem::path(cue_dir) / auto_cue.file_order[0];
-                fprintf(stdout, "CUE file detected, using BIN: %s\n", bin_path.filename().string().c_str());
-                options.cue_filename = options.in_filename;
-                options.in_filename = bin_path.string();
-            }
+    if (options.batch_cue_mode || options.batch_decode_mode) {
+        options.jobs = 1;
+        if (options.batch_jobs == 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            options.batch_jobs = (hc > 0) ? hc : 1;
         }
     }
 
-    // Detect if the file is a ECM3 file
-    if (!options.in_filename.empty()) {
-        std::ifstream tmp_f(options.in_filename.c_str(), std::ios::binary);
-        if (tmp_f.good()) {
-            std::string sig(3, '\0');
-            tmp_f.read(&sig[0], 3);
-            if (sig == "ECM") {
-                decode = true;
-            }
-        }
-    }
+    std::atomic<int> overall_return_code(0);
+    size_t num_batch = batch_files.size();
+    bool batch_mode = (num_batch > 1);
 
-// Encoding process
-    if (!decode) {
-        // Auto-detect CUE when input is a .bin (must run before the CUE handling below)
-        if (options.cue_filename.empty()) {
-            namespace fs = std::filesystem;
-            fs::path in_path(options.in_filename);
-            std::string ext = in_path.extension().string();
-            if (ext != ".cue" && ext != ".CUE" && ext != ".ecm3") {
-                // Strategy 1: same basename, different extension
-                fs::path cue_path = in_path;
-                cue_path.replace_extension(".cue");
-                if (fs::exists(cue_path)) {
-                    fprintf(stdout, "Auto-detected CUE: %s\n", cue_path.filename().string().c_str());
-                    options.cue_filename = cue_path.string();
+#ifdef _WIN32
+    g_veh_handle = AddVectoredExceptionHandler(1, veh_crash_handler);
+#else
+    void (*old_sigsegv)(int) = signal(SIGSEGV, crash_handler);
+    void (*old_sigabrt)(int) = signal(SIGABRT, crash_handler);
+#endif
+
+    if (num_batch > 1 && options.batch_jobs > 1) {
+        std::mutex io_mutex;
+        std::atomic<size_t> next_idx(0);
+
+        set_progress_show_cerr(false);
+
+        auto worker = [&]() {
+            while (true) {
+                size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= num_batch) break;
+
+                std::string fname = std::filesystem::path(batch_files[idx]).filename().string();
+
+                {
+                    std::lock_guard<std::mutex> lock(io_mutex);
+                    fprintf(stdout, "\n[%zu/%zu] %s\n", idx + 1, num_batch, fname.c_str());
                 }
-                // Strategy 2: search directory for .cue files that reference this BIN
-                if (options.cue_filename.empty()) {
-                    fs::path in_dir = in_path.parent_path();
-                    if (in_dir.empty()) in_dir = ".";
-                    std::string in_filename = in_path.filename().string();
-                    std::string in_filename_lower = in_filename;
-                    std::transform(in_filename_lower.begin(), in_filename_lower.end(), in_filename_lower.begin(), ::tolower);
-                    for (auto& entry : fs::directory_iterator(in_dir)) {
-                        if (entry.path().extension() != ".cue") continue;
-                        cue_sheet auto_cue;
-                        if (cue_parse(entry.path().string(), auto_cue) != 0 || auto_cue.file_order.empty())
-                            continue;
-                        for (auto& fname : auto_cue.file_order) {
-                            if (fname == in_filename_lower) {
-                                fprintf(stdout, "Auto-detected CUE: %s\n", entry.path().filename().string().c_str());
-                                options.cue_filename = entry.path().string();
-                                break;
+
+                batch_file_result result;
+                int crashed = 0;
+                g_crash_recovering = 1;
+                if (setjmp(g_crash_jmpbuf) == 0) {
+                    try {
+                        result = process_batch_file(
+                            batch_files[idx], options, batch_mode, batch_mode);
+
+                        if (!result.error_message.empty()) {
+                            std::lock_guard<std::mutex> lock(io_mutex);
+                            fprintf(stderr, "[%s] %s", fname.c_str(), result.error_message.c_str());
+                        }
+
+                        if (g_interrupted.load(std::memory_order_relaxed)) {
+                            g_crash_recovering = 0;
+                            break;
+                        }
+
+                        if (result.return_code != 0) {
+                            if (!result.specific_error_printed && !result.keep_output) {
+                                std::lock_guard<std::mutex> lock(io_mutex);
+                                fprintf(stderr, "\n\n[%s] ERROR: there was an error processing the input file.\n\n", fname.c_str());
+                                if (std::filesystem::exists(result.out_filename)) {
+                                    std::filesystem::remove(result.out_filename);
+                                }
+                            }
+                            if (result.decode && result.verify) {
+                                std::lock_guard<std::mutex> lock(io_mutex);
+                                fprintf(stdout, "\n\n[%s] Verification: FAILED (error %d)\n", fname.c_str(), result.return_code);
+                            }
+                            overall_return_code = result.return_code;
+                        } else {
+                            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                result.end_time - result.start_time);
+                            {
+                                std::lock_guard<std::mutex> lock(io_mutex);
+                                if (result.decode && result.verify) {
+                                    fprintf(stdout, "\n\n[%s] Verification: PASSED (EDC check OK)\n", fname.c_str());
+                                } else {
+                                    fprintf(stdout, "\n\n[%s] The file was processed without any problem\n", fname.c_str());
+                                }
+                                fprintf(stdout, "[%s] Total execution time: %0.3fs\n\n", fname.c_str(), duration.count() / 1000.0F);
+                            }
+
+                            if (result.decode && !result.verify && result.split_output && result.has_metadata && !result.meta_entries.empty()) {
+                                if (result.meta_entries.size() > 1) {
+                                    if (split_output_bin(result.out_filename, result.meta_header, result.meta_entries, result.meta_header.total_sectors, result.force_rewrite) == 0) {
+                                        std::error_code ec;
+                                        if (!std::filesystem::remove(result.out_filename, ec) && ec) {
+                                            std::lock_guard<std::mutex> lock(io_mutex);
+                                            fprintf(stderr, "[%s] WARNING: Could not remove temporary combined BIN: %s\n", fname.c_str(), ec.message().c_str());
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (result.delete_source && !result.delete_paths.empty()) {
+                                for (const auto& path : result.delete_paths) {
+                                    std::error_code ec;
+                                    if (std::filesystem::remove(path, ec)) {
+                                        std::lock_guard<std::mutex> lock(io_mutex);
+                                        fprintf(stdout, "[%s] Deleted source: %s\n", fname.c_str(), path.c_str());
+                                    } else if (ec) {
+                                        std::lock_guard<std::mutex> lock(io_mutex);
+                                        fprintf(stderr, "[%s] WARNING: Could not delete %s: %s\n", fname.c_str(), path.c_str(), ec.message().c_str());
+                                    }
+                                }
                             }
                         }
-                        if (!options.cue_filename.empty()) break;
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> lock(io_mutex);
+                        fprintf(stderr, "[%s] %s\n", fname.c_str(), e.what());
+                        crashed = 1;
+                    } catch (...) {
+                        std::lock_guard<std::mutex> lock(io_mutex);
+                        fprintf(stderr, "[%s] UNKNOWN EXCEPTION\n", fname.c_str());
+                        crashed = 1;
                     }
+                } else {
+                    std::lock_guard<std::mutex> lock(io_mutex);
+                    fprintf(stderr, "[%s] CRASH: fatal error while processing file (possible corrupted data)\n", fname.c_str());
+                    crashed = 1;
+                }
+                g_crash_recovering = 0;
+                if (crashed) {
+                    overall_return_code = 1;
+                    continue;
                 }
             }
+        };
+
+        size_t num_threads = (std::min)((size_t)options.batch_jobs, num_batch);
+        std::vector<std::thread> threads;
+        for (size_t i = 0; i < num_threads; i++) {
+            threads.emplace_back(worker);
         }
-
-        // --cue handling: parse cue sheet and optionally concatenate split BINs
-        cue_sheet parsed_cue;
-        bool has_cue = false;
-        if (!options.cue_filename.empty()) {
-            if (cue_parse(options.cue_filename, parsed_cue) != 0) {
-                fprintf(stderr, "ERROR: Failed to parse CUE file: %s\n", options.cue_filename.c_str());
-                return_code = 1;
-                goto exit;
+        for (auto& t : threads) {
+            t.join();
+        }
+        set_progress_show_cerr(true);
+    } else {
+        set_progress_show_cerr(false);
+        for (size_t file_idx = 0; file_idx < num_batch; file_idx++) {
+            std::string fname = std::filesystem::path(batch_files[file_idx]).filename().string();
+            if (batch_mode) {
+                fprintf(stdout, "\n[%zu/%zu] %s\n", file_idx + 1, num_batch, fname.c_str());
             }
-            has_cue = true;
 
-            std::string cue_dir = get_cue_dir(options.cue_filename);
+            batch_file_result result;
+            int crashed = 0;
+            g_crash_recovering = 1;
+            if (setjmp(g_crash_jmpbuf) == 0) {
+                try {
+                    result = process_batch_file(
+                        batch_files[file_idx], options, batch_mode, batch_mode);
 
-            if (parsed_cue.file_order.size() > 1) {
-                if (concat_split_bins(parsed_cue, cue_dir, temp_concat) != 0) {
-                    return_code = 1;
-                    goto exit;
+                    if (!result.error_message.empty()) {
+                        fprintf(stderr, "[%s] %s", fname.c_str(), result.error_message.c_str());
+                    }
+
+                    if (g_interrupted.load(std::memory_order_relaxed)) {
+                        if (!result.out_filename.empty() && !result.verify) {
+                            fprintf(stderr, "\nInterrupted. Cleaning up...\n");
+                            if (std::filesystem::exists(result.out_filename)) {
+                                std::filesystem::remove(result.out_filename);
+                            }
+                        }
+                        g_crash_recovering = 0;
+                        break;
+                    }
+
+                    if (result.return_code != 0) {
+                        if (!result.specific_error_printed && !result.keep_output) {
+                            fprintf(stderr, "\n\n[%s] ERROR: there was an error processing the input file.\n\n", fname.c_str());
+                            if (std::filesystem::exists(result.out_filename)) {
+                                std::filesystem::remove(result.out_filename);
+                            }
+                        }
+                        if (result.decode && result.verify) {
+                            fprintf(stdout, "\n\n[%s] Verification: FAILED (error %d)\n", fname.c_str(), result.return_code);
+                        }
+                        overall_return_code = result.return_code;
+                    } else {
+                        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            result.end_time - result.start_time);
+                        if (result.decode && result.verify) {
+                            fprintf(stdout, "\n\nVerification: PASSED (EDC check OK)\n");
+                        } else {
+                            fprintf(stdout, "\n\nThe file was processed without any problem\n");
+                        }
+                        fprintf(stdout, "Total execution time: %0.3fs\n\n", duration.count() / 1000.0F);
+
+                        if (result.decode && !result.verify && result.split_output && result.has_metadata && !result.meta_entries.empty()) {
+                            if (result.meta_entries.size() > 1) {
+                                if (split_output_bin(result.out_filename, result.meta_header, result.meta_entries, result.meta_header.total_sectors, result.force_rewrite) == 0) {
+                                    std::error_code ec;
+                                    if (!std::filesystem::remove(result.out_filename, ec) && ec) {
+                                        fprintf(stderr, "WARNING: Could not remove temporary combined BIN: %s\n", ec.message().c_str());
+                                    }
+                                }
+                            }
+                        }
+
+                        if (result.delete_source && !result.delete_paths.empty()) {
+                            for (const auto& path : result.delete_paths) {
+                                std::error_code ec;
+                                if (std::filesystem::remove(path, ec)) {
+                                    fprintf(stdout, "Deleted source: %s\n", path.c_str());
+                                } else if (ec) {
+                                    fprintf(stderr, "WARNING: Could not delete %s: %s\n", path.c_str(), ec.message().c_str());
+                                }
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[%s] %s\n", fname.c_str(), e.what());
+                    crashed = 1;
+                } catch (...) {
+                    fprintf(stderr, "[%s] UNKNOWN EXCEPTION\n", fname.c_str());
+                    crashed = 1;
                 }
-                options.in_filename = temp_concat.path();
             } else {
-                options.in_filename = (std::filesystem::path(cue_dir) / parsed_cue.file_order[0]).string();
+                fprintf(stderr, "[%s] CRASH: fatal error while processing file (possible corrupted data)\n", fname.c_str());
+                crashed = 1;
             }
-        }
-
-        // Derive output filename from input if not provided (use stem() to strip any extension)
-        if (options.out_filename.empty()) {
-            std::filesystem::path base = has_cue
-                ? std::filesystem::path(options.cue_filename)
-                : std::filesystem::path(options.in_filename);
-            options.out_filename = (base.parent_path() / (base.stem().string() + ".ecm3")).string();
-        }
-
-        // Check if output file already exists
-        if (!options.force_rewrite && std::filesystem::exists(options.out_filename)) {
-            fprintf(stderr, "ERROR: output file already exists. Use -f to overwrite.\n");
-            specific_error_printed = true;
-            return_code = 1;
-            goto exit;
-        }
-
-        // Call core encode function
-        ecm3_result encode_result;
-        return_code = ecm3_encode(options.in_filename, options.out_filename, options,
-                                   has_cue ? &parsed_cue : nullptr, has_cue, encode_result);
-        if (return_code == 0) {
-            meta_header = encode_result.meta_header;
-            meta_entries = encode_result.meta_entries;
-            has_metadata = encode_result.has_metadata;
-            options.delete_paths = encode_result.source_paths;
-
-            summary(
-                &encode_result.sectors_type_summary,
-                &options,
-                0,
-                &encode_result.encode_streams_script
-            );
-        }
-        if (return_code != 0) {
-            goto exit;
-        }
-    }
-    // Decoding process
-    else {
-        // Derive output filename from input: strip .ecm3, use .bin
-        if (options.out_filename.empty()) {
-            std::string in = options.in_filename;
-            if (in.size() >= 5 && in.substr(in.size() - 5) == ".ecm3") {
-                in.resize(in.size() - 5);
-            }
-            options.out_filename = in + ".bin";
-        }
-
-        mycounter_is_verify = options.verify;
-
-        // Check if output file already exists
-        if (!options.verify && !options.force_rewrite && std::filesystem::exists(options.out_filename)) {
-            fprintf(stderr, "ERROR: output file already exists. Use -f to overwrite.\n");
-            specific_error_printed = true;
-            return_code = 1;
-            goto exit;
-        }
-
-        // Call core decode function
-        ecm3_result decode_result;
-        return_code = ecm3_decode(options.in_filename, options.out_filename, options, decode_result);
-        if (return_code == 0) {
-            meta_header = decode_result.meta_header;
-            meta_entries = decode_result.meta_entries;
-            has_metadata = decode_result.has_metadata;
-            options.delete_paths = decode_result.source_paths;
-
-            // Write .cue file if metadata was found
-            if (has_metadata && !options.verify) {
-                write_cue_from_metadata(meta_header, meta_entries, options.out_filename, options.split_output);
-            }
-        }
-        if (return_code != 0) {
-            goto exit;
-        }
-    }
-
-    exit:
-    // temp_concat RAII destructor will clean up the temp file automatically
-
-    if (g_interrupted.load(std::memory_order_relaxed)) {
-        fprintf(stderr, "\nInterrupted. Cleaning up...\n");
-        if (!options.out_filename.empty() && !options.verify) {
-            if (std::filesystem::exists(options.out_filename)) {
-                std::filesystem::remove(options.out_filename);
-            }
-        }
-        return_code = 1;
-    }
-    else if (return_code != 0) {
-        if (!specific_error_printed && !options.keep_output && !options.verify) {
-            fprintf(stderr, "\n\nERROR: there was an error processing the input file.\n\n");
-            if (std::filesystem::exists(options.out_filename)) {
-                std::filesystem::remove(options.out_filename);
-            }
-        }
-        if (decode && options.verify) {
-            fprintf(stdout, "\n\nVerification: FAILED (error %d)\n", return_code);
-        }
-    }
-    else {
-        auto stop = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
-        if (decode && options.verify) {
-            fprintf(stdout, "\n\nVerification: PASSED (EDC check OK)\n");
-        } else {
-            fprintf(stdout, "\n\nThe file was processed without any problem\n");
-        }
-        fprintf(stdout, "Total execution time: %0.3fs\n\n", duration.count() / 1000.0F);
-
-        if (decode && !options.verify && options.split_output && has_metadata && !meta_entries.empty()) {
-            if (meta_entries.size() > 1) {
-                if (split_output_bin(options.out_filename, meta_header, meta_entries, meta_header.total_sectors, options.force_rewrite) == 0) {
-                    std::error_code ec;
-                    if (!std::filesystem::remove(options.out_filename, ec) && ec) {
-                        fprintf(stderr, "WARNING: Could not remove temporary combined BIN: %s\n", ec.message().c_str());
-                    }
-                }
-            }
-        }
-
-        // Delete source files if --delete-source was specified
-        if (options.delete_source && !options.delete_paths.empty()) {
-            for (const auto& path : options.delete_paths) {
-                std::error_code ec;
-                if (std::filesystem::remove(path, ec)) {
-                    fprintf(stdout, "Deleted source: %s\n", path.c_str());
-                } else if (ec) {
-                    fprintf(stderr, "WARNING: Could not delete %s: %s\n", path.c_str(), ec.message().c_str());
-                }
+            g_crash_recovering = 0;
+            if (crashed) {
+                overall_return_code = 1;
+                continue;
             }
         }
     }
-    if (return_code != 0) {
-        overall_return_code = return_code;
-    }
-    if (g_interrupted.load(std::memory_order_relaxed)) {
-        break;
-    }
-}
-return overall_return_code;
+    set_progress_show_cerr(true);
+#ifdef _WIN32
+    if (g_veh_handle) RemoveVectoredExceptionHandler(g_veh_handle);
+#else
+    signal(SIGSEGV, old_sigsegv);
+    signal(SIGABRT, old_sigabrt);
+#endif
+    return overall_return_code;
 }
 #endif // ECM3_GUI
 
@@ -2078,8 +2331,8 @@ static ecm3_return_code encode_single_stream(
                                 st == STT_MODE2_1 || st == STT_MODE2_1_GAP);
                 uint32_t edc_size = (has_ecc && (options->optimizations & OO_REMOVE_ECC)) ? 0x81C : 2352;
                 result.partial_edc = local_sTools.edc_compute(result.partial_edc, in_sector, edc_size);
+                result.byte_count += edc_size;
             }
-            result.byte_count += 2352;
 
             if (progress) progress->store(result.byte_count, std::memory_order_relaxed);
 
@@ -3263,6 +3516,11 @@ int get_options(
                 options->batch_directory = optarg;
                 break;
 
+            // long option "--batch-jobs"
+            case 8:
+                options->batch_jobs = (uint32_t)strtoul(optarg, NULL, 10);
+                break;
+
             // long option "--delete-source"
             case 5:
                 options->delete_source = true;
@@ -3350,15 +3608,17 @@ static void encode_progress(void) {
         " Total(%02u%%) %4.1fMB/s",
         total_pct, throughput);
 
+    if (g_progress_show_cerr.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(g_progress_mutex);
 #ifdef ECM3_GUI
-    std::cerr << buf << "\n";
+        std::cerr << buf << "\n";
 #else
-    std::cerr << buf << "\r";
+        std::cerr << buf << "\r";
 #endif
+    }
 
     if (g_progress_cb) g_progress_cb(total_pct);
 }
-
 
 static void decode_progress(void) {
     auto now = std::chrono::steady_clock::now();
@@ -3371,11 +3631,14 @@ static void decode_progress(void) {
         mycounter_is_verify ? "Verify" : "Decode",
         mycounter_decode_display, throughput);
 
+    if (g_progress_show_cerr.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(g_progress_mutex);
 #ifdef ECM3_GUI
-    std::cerr << buf << "\n";
+        std::cerr << buf << "\n";
 #else
-    std::cerr << buf << "\r";
+        std::cerr << buf << "\r";
 #endif
+    }
 
     if (g_progress_cb) g_progress_cb(mycounter_decode_display);
 }
@@ -3670,6 +3933,8 @@ void print_help() {
     "  Batch:\n"
     "        --batch-cue <dir>              Encode all .cue files in a directory tree\n"
     "        --batch-decode <dir>            Decode all .ecm3 files in a directory tree\n"
+    "        -o <dir>                        Output directory for batch processing\n"
+    "        --batch-jobs <n>               Process batch files in parallel (0=auto, default 0)\n"
     );
 }
 

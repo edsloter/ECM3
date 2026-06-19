@@ -111,6 +111,7 @@ Combines per-track `.bin` files (from a multi-FILE `.cue`) into a single `.bin` 
 | `--delete-source` | Delete source file after successful encode/decode |
 | `--batch-cue <dir>` | Encode all `.cue` files in a directory tree |
 | `--batch-decode <dir>` | Decode all `.ecm3` files in a directory tree |
+| `--batch-jobs <n>` | Parallel batch files (0=auto, default 0). Forces `-j` to 1 |
 
 ## CUE Sheet Workflow
 
@@ -194,6 +195,19 @@ ecm3 -i game.ecm3 -j 2                   # parallel decode
 Each stream is compressed or decompressed independently — stream N's output never depends on stream M. Results are assembled in fixed stream order, so the `.ecm3` file is **bit-identical** whether you use `-j 1` on a single-core machine or `-j 16` on a 16-core machine. The same applies to decoding.
 
 Large images are handled without excessive memory: parallel decode streams to temporary files, then concatenates and computes EDC in a single pass.
+
+### Batch-Level Parallelism
+
+When processing multiple files with `--batch-cue` or `--batch-decode`, use
+`--batch-jobs <n>` to process files concurrently. In batch mode `-j` is
+automatically set to `1` (per-file streams are sequential) — only
+`--batch-jobs` controls parallelism, preventing thread oversubscription.
+
+```
+ecm3 --batch-cue ./games --batch-jobs 0       # auto-detect CPU count
+ecm3 --batch-cue ./games --batch-jobs 8        # up to 8 files at once
+ecm3 --batch-decode ./archives --batch-jobs 4  # decode 4 at a time
+```
 
 ## Building
 

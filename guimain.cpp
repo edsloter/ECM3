@@ -33,6 +33,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
+#include "resource.h"
 #endif
 #include "ecm3.h"
 #include "ecm3_core.h"
@@ -138,12 +139,13 @@ public:
                            wxDefaultPosition, wxSize(900, 700)) {
 #if defined(_WIN32)
         {
-            HICON hIcon = ::LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(1));
+            HICON hIcon = ::LoadIconW(
+                ::GetModuleHandleW(nullptr),
+                MAKEINTRESOURCEW(IDI_ICON1)
+            );
             if (hIcon) {
-                wxIcon icon;
-                icon.CreateFromHICON(hIcon);
-                SetIcon(icon);
-                ::DestroyIcon(hIcon);
+                ::SendMessageW((HWND)GetHWND(), WM_SETICON, ICON_BIG,   (LPARAM)hIcon);
+                ::SendMessageW((HWND)GetHWND(), WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
             }
         }
 #endif
@@ -157,6 +159,7 @@ public:
         CreateBatchEncodeTab();
         CreateBatchDecodeTab();
         CreateCueSplitTab();
+        CreateBatchCueSplitTab();
         CreateSettingsTab();
         CreateAboutTab();
 
@@ -231,6 +234,9 @@ wxNotebook* m_notebook;
     wxStaticText* m_encodeSpbLabel;
     wxCheckBox* m_encodeForce;
     wxCheckBox* m_encodeDeleteSource;
+#ifdef DEBUG
+    wxSpinCtrl* m_encodeJobs;
+#endif
 
     // Decode tab
     wxPanel* m_decodePanel;
@@ -240,6 +246,9 @@ wxNotebook* m_notebook;
     wxCheckBox* m_decodeForce;
     wxCheckBox* m_decodeVerify;
     wxCheckBox* m_decodeDeleteSource;
+#ifdef DEBUG
+    wxSpinCtrl* m_decodeJobs;
+#endif
 
 private:
     wxPanel* m_batchEncodePanel;
@@ -254,6 +263,10 @@ private:
     wxCheckBox* m_batchEncodeForce;
     wxCheckBox* m_batchEncodeDeleteSource;
     wxDirPickerCtrl* m_batchEncodeOutputDir;
+    wxSpinCtrl* m_batchEncodeJobs;
+#ifdef DEBUG
+    wxSpinCtrl* m_batchEncodeStreamJobs;
+#endif
 
     // Batch Decode tab
     wxPanel* m_batchDecodePanel;
@@ -263,6 +276,10 @@ private:
     wxCheckBox* m_batchDecodeForce;
     wxCheckBox* m_batchDecodeVerify;
     wxCheckBox* m_batchDecodeDeleteSource;
+    wxSpinCtrl* m_batchDecodeJobs;
+#ifdef DEBUG
+    wxSpinCtrl* m_batchDecodeStreamJobs;
+#endif
 
     // Settings tab
     wxPanel* m_settingsPanel;
@@ -278,6 +295,14 @@ private:
     wxFilePickerCtrl* m_cueSplitInput;
     wxDirPickerCtrl* m_cueSplitOutput;
     wxCheckBox* m_cueSplitForce;
+
+    // Batch CUE Split/Combine tab
+    wxPanel* m_batchCueSplitPanel;
+    wxRadioBox* m_batchCueSplitMode;
+    wxDirPickerCtrl* m_batchCueSplitDir;
+    wxDirPickerCtrl* m_batchCueSplitOutput;
+    wxCheckBox* m_batchCueSplitForce;
+    wxSpinCtrl* m_batchCueSplitJobs;
 
     wxTextCtrl* m_output;
     wxGauge* m_progressGauge;
@@ -307,7 +332,11 @@ private:
 
         int sel = m_notebook->GetSelection();
 
-        set_progress_callback(on_progress_update);
+        if (sel == 2 || sel == 3 || sel == 5) {
+            set_progress_callback(nullptr); // batch: handled internally via file count
+        } else {
+            set_progress_callback(on_progress_update);
+        }
 
         m_worker = std::thread([this, sel]() {
             int rc = 0;
@@ -323,6 +352,8 @@ private:
                 rc = RunBatchDecode();
             } else if (sel == 4) {
                 rc = RunCueSplit();
+            } else if (sel == 5) {
+                rc = RunBatchCueSplit();
             }
 
             auto stop = std::chrono::high_resolution_clock::now();
@@ -369,6 +400,9 @@ private:
             ? static_cast<uint8_t>(m_encodeSectorsPerBlock->GetValue()) : 0;
         opts.force_rewrite = m_encodeForce->GetValue();
         opts.delete_source = m_encodeDeleteSource->GetValue();
+#ifdef DEBUG
+        opts.jobs = static_cast<uint32_t>(m_encodeJobs->GetValue());
+#endif
 
         // Auto-detect CUE
         if (opts.cue_filename.empty()) {
@@ -460,6 +494,9 @@ private:
         opts.verify = m_decodeVerify->GetValue();
         opts.split_output = m_decodeSplit->GetValue();
         opts.delete_source = m_decodeDeleteSource->GetValue();
+#ifdef DEBUG
+        opts.jobs = static_cast<uint32_t>(m_decodeJobs->GetValue());
+#endif
 
         // Derive output filename
         if (opts.out_filename.empty()) {
@@ -539,6 +576,8 @@ private:
         opts.batch_cue_mode = true;
         opts.batch_directory = dir;
 
+        set_progress_show_cerr(false);
+
         std::vector<std::string> batch_files;
         try {
             for (auto& p : std::filesystem::recursive_directory_iterator(dir)) {
@@ -560,19 +599,43 @@ private:
 
         std::cout << "Found " << batch_files.size() << " .cue file(s)\n";
 
-        int overall_rc = 0;
-        for (size_t i = 0; i < batch_files.size(); i++) {
-            if (g_gui_interrupted.load()) break;
+        opts.batch_jobs = static_cast<uint32_t>(m_batchEncodeJobs->GetValue());
+        if (opts.batch_jobs == 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            opts.batch_jobs = (hc > 0) ? hc : 1;
+        }
+        opts.jobs = 1;
 
-            std::cout << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
-                      << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+        int overall_rc = 0;
+        std::mutex output_mutex;
+        std::atomic<size_t> batch_completed{0};
+
+        auto batch_progress = [&]() {
+            size_t done = batch_completed.load(std::memory_order_relaxed);
+            int pct = static_cast<int>(done * 100 / batch_files.size());
+            wxCommandEvent* evt = new wxCommandEvent(EVT_PROGRESS_GAUGE);
+            evt->SetInt(pct);
+            wxQueueEvent(wxTheApp->GetTopWindow(), evt);
+        };
+
+        auto output_text = [&](const std::string& text) {
+            wxCommandEvent* evt = new wxCommandEvent(EVT_APPEND_TEXT);
+            evt->SetString(text);
+            std::lock_guard<std::mutex> lock(output_mutex);
+            wxQueueEvent(m_output, evt);
+        };
+
+        auto process_encode_file = [&](size_t i) -> int {
+            std::ostringstream buf;
 
             cue_sheet parsed_cue;
             if (cue_parse(batch_files[i], parsed_cue) != 0) {
-                std::cerr << "ERROR: Failed to parse CUE\n";
-                std::cerr << "  FAILED\n";
-                overall_rc = 1;
-                continue;
+                buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                    << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+                buf << "ERROR: Failed to parse CUE\n";
+                buf << "  FAILED\n";
+                output_text(buf.str());
+                return 1;
             }
 
             std::string cue_dir = get_cue_dir(batch_files[i]);
@@ -581,10 +644,12 @@ private:
             std::string bin_path;
             if (parsed_cue.file_order.size() > 1) {
                 if (concat_split_bins(parsed_cue, cue_dir, temp_concat) != 0) {
-                    std::cerr << "ERROR: Failed to concatenate split bins\n";
-                    std::cerr << "  FAILED\n";
-                    overall_rc = 1;
-                    continue;
+                    buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                        << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+                    buf << "ERROR: Failed to concatenate split bins\n";
+                    buf << "  FAILED\n";
+                    output_text(buf.str());
+                    return 1;
                 }
                 bin_path = temp_concat.path();
             } else {
@@ -600,28 +665,70 @@ private:
                 outPath = (cueP.parent_path() / (cueP.stem().string() + ".ecm3")).string();
             }
 
-            opts.in_filename = bin_path;
-            opts.cue_filename = batch_files[i];
-            opts.out_filename = outPath;
-            opts.force_rewrite = m_batchEncodeForce->GetValue();
-            opts.delete_paths.clear();
+            ecm_options file_opts = opts;
+            file_opts.in_filename = bin_path;
+            file_opts.cue_filename = batch_files[i];
+            file_opts.out_filename = outPath;
+            file_opts.force_rewrite = m_batchEncodeForce->GetValue();
+            file_opts.delete_paths.clear();
+
+            buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                << std::filesystem::path(batch_files[i]).filename().string() << "\n";
 
             ecm3_result result;
-            int rc = ecm3_encode(opts.in_filename, opts.out_filename, opts, &parsed_cue, true, result);
+            int rc = ecm3_encode(file_opts.in_filename, file_opts.out_filename, file_opts, &parsed_cue, true, result);
 
             if (rc == 0) {
-                if (opts.delete_source) {
+                if (file_opts.delete_source) {
                     for (const auto& path : result.source_paths) {
                         std::error_code ec;
                         std::filesystem::remove(path, ec);
                     }
                 }
-                std::cout << "  OK\n";
+                buf << "  OK\n";
             } else {
-                std::cerr << "  FAILED\n";
-                overall_rc = rc;
+                buf << "  FAILED\n";
+            }
+
+            output_text(buf.str());
+            return rc;
+        };
+
+        if (opts.batch_jobs > 1 && batch_files.size() > 1) {
+            std::atomic<size_t> next_idx(0);
+            std::atomic<int> any_error(0);
+
+            auto worker = [&]() {
+                while (true) {
+                    size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= batch_files.size()) break;
+                    if (g_gui_interrupted.load()) break;
+
+                    int rc = process_encode_file(i);
+                    if (rc != 0) any_error.store(1, std::memory_order_relaxed);
+                    batch_completed.fetch_add(1, std::memory_order_relaxed);
+                    batch_progress();
+                }
+            };
+
+            size_t num_threads = (std::min)((size_t)opts.batch_jobs, batch_files.size());
+            std::vector<std::thread> threads;
+            for (size_t t = 0; t < num_threads; t++)
+                threads.emplace_back(worker);
+            for (auto& t : threads)
+                t.join();
+
+            if (any_error.load()) overall_rc = 1;
+        } else {
+            for (size_t i = 0; i < batch_files.size(); i++) {
+                if (g_gui_interrupted.load()) break;
+                int rc = process_encode_file(i);
+                if (rc != 0) overall_rc = rc;
+                batch_completed.fetch_add(1, std::memory_order_relaxed);
+                batch_progress();
             }
         }
+        set_progress_show_cerr(true);
         return overall_rc;
     }
 
@@ -636,6 +743,8 @@ private:
         opts.delete_source = m_batchDecodeDeleteSource->GetValue();
         opts.batch_decode_mode = true;
         opts.batch_directory = dir;
+
+        set_progress_show_cerr(false);
 
         std::vector<std::string> batch_files;
         try {
@@ -658,12 +767,34 @@ private:
 
         std::cout << "Found " << batch_files.size() << " .ecm3 file(s)\n";
 
-        int overall_rc = 0;
-        for (size_t i = 0; i < batch_files.size(); i++) {
-            if (g_gui_interrupted.load()) break;
+        opts.batch_jobs = static_cast<uint32_t>(m_batchDecodeJobs->GetValue());
+        if (opts.batch_jobs == 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            opts.batch_jobs = (hc > 0) ? hc : 1;
+        }
+        opts.jobs = 1;
 
-            std::cout << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
-                      << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+        int overall_rc = 0;
+        std::mutex output_mutex;
+        std::atomic<size_t> batch_completed{0};
+
+        auto batch_progress = [&]() {
+            size_t done = batch_completed.load(std::memory_order_relaxed);
+            int pct = static_cast<int>(done * 100 / batch_files.size());
+            wxCommandEvent* evt = new wxCommandEvent(EVT_PROGRESS_GAUGE);
+            evt->SetInt(pct);
+            wxQueueEvent(wxTheApp->GetTopWindow(), evt);
+        };
+
+        auto output_text = [&](const std::string& text) {
+            wxCommandEvent* evt = new wxCommandEvent(EVT_APPEND_TEXT);
+            evt->SetString(text);
+            std::lock_guard<std::mutex> lock(output_mutex);
+            wxQueueEvent(m_output, evt);
+        };
+
+        auto process_decode_file = [&](size_t i) -> int {
+            std::ostringstream buf;
 
             std::string in = batch_files[i];
             if (in.size() >= 5 && in.substr(in.size() - 5) == ".ecm3") {
@@ -678,63 +809,107 @@ private:
                 outPath = in + ".bin";
             }
 
-            opts.in_filename = batch_files[i];
-            opts.out_filename = outPath;
-            opts.force_rewrite = m_batchDecodeForce->GetValue();
-            opts.split_output = m_batchDecodeSplit->GetValue();
-            opts.verify = m_batchDecodeVerify->GetValue();
-            opts.delete_paths.clear();
+            ecm_options file_opts = opts;
+            file_opts.in_filename = batch_files[i];
+            file_opts.out_filename = outPath;
+            file_opts.force_rewrite = m_batchDecodeForce->GetValue();
+            file_opts.split_output = m_batchDecodeSplit->GetValue();
+            file_opts.verify = m_batchDecodeVerify->GetValue();
+            file_opts.delete_paths.clear();
 
-            if (!opts.verify && !opts.force_rewrite && std::filesystem::exists(opts.out_filename)) {
-                std::cerr << "ERROR: output file already exists: " << opts.out_filename
-                           << ". Check 'Force overwrite' to overwrite.\n";
-                std::cerr << "  FAILED\n";
-                overall_rc = 1;
-                continue;
+            if (!file_opts.verify && !file_opts.force_rewrite && std::filesystem::exists(file_opts.out_filename)) {
+                buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                    << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+                buf << "ERROR: output file already exists: " << file_opts.out_filename
+                    << ". Check 'Force overwrite' to overwrite.\n";
+                buf << "  FAILED\n";
+                output_text(buf.str());
+                return 1;
             }
 
+            buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+
             ecm3_result result;
-            int rc = ecm3_decode(opts.in_filename, opts.out_filename, opts, result);
+            int rc = ecm3_decode(file_opts.in_filename, file_opts.out_filename, file_opts, result);
 
             if (rc == 0) {
-                if (opts.verify) {
-                    std::cout << "  VERIFY: Would write " << opts.out_filename << "\n";
+                if (file_opts.verify) {
+                    buf << "  VERIFY: Would write " << file_opts.out_filename << "\n";
                     if (result.has_metadata) {
-                        std::filesystem::path cue_path(opts.out_filename);
+                        std::filesystem::path cue_path(file_opts.out_filename);
                         cue_path.replace_extension(".cue");
-                        std::cout << "  VERIFY: Would write " << cue_path.string() << "\n";
-                        if (opts.split_output && result.meta_entries.size() > 1) {
-                            std::cout << "  VERIFY: Would write " << result.meta_entries.size()
-                                      << " track file(s)\n";
+                        buf << "  VERIFY: Would write " << cue_path.string() << "\n";
+                        if (file_opts.split_output && result.meta_entries.size() > 1) {
+                            buf << "  VERIFY: Would write " << result.meta_entries.size()
+                                << " track file(s)\n";
                         }
                     }
                 } else {
                     if (result.has_metadata) {
                         write_cue_from_metadata(result.meta_header, result.meta_entries,
-                                                opts.out_filename, opts.split_output);
+                                                file_opts.out_filename, file_opts.split_output);
                     }
 
                     if (result.has_metadata && result.meta_entries.size() > 1) {
-                        if (split_output_bin(opts.out_filename, result.meta_header, result.meta_entries,
-                                             result.meta_header.total_sectors, opts.force_rewrite) == 0) {
+                        if (split_output_bin(file_opts.out_filename, result.meta_header, result.meta_entries,
+                                             result.meta_header.total_sectors, file_opts.force_rewrite) == 0) {
                             std::error_code ec;
-                            std::filesystem::remove(opts.out_filename, ec);
+                            std::filesystem::remove(file_opts.out_filename, ec);
                         }
                     }
 
-                    if (opts.delete_source) {
+                    if (file_opts.delete_source) {
                         for (const auto& path : result.source_paths) {
                             std::error_code ec;
                             std::filesystem::remove(path, ec);
                         }
                     }
                 }
-                std::cout << "  OK\n";
+                buf << "  OK\n";
             } else {
-                std::cerr << "  FAILED\n";
-                overall_rc = rc;
+                buf << "  FAILED\n";
+            }
+
+            output_text(buf.str());
+            return rc;
+        };
+
+        if (opts.batch_jobs > 1 && batch_files.size() > 1) {
+            std::atomic<size_t> next_idx(0);
+            std::atomic<int> any_error(0);
+
+            auto worker = [&]() {
+                while (true) {
+                    size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= batch_files.size()) break;
+                    if (g_gui_interrupted.load()) break;
+
+                    int rc = process_decode_file(i);
+                    if (rc != 0) any_error.store(1, std::memory_order_relaxed);
+                    batch_completed.fetch_add(1, std::memory_order_relaxed);
+                    batch_progress();
+                }
+            };
+
+            size_t num_threads = (std::min)((size_t)opts.batch_jobs, batch_files.size());
+            std::vector<std::thread> threads;
+            for (size_t t = 0; t < num_threads; t++)
+                threads.emplace_back(worker);
+            for (auto& t : threads)
+                t.join();
+
+            if (any_error.load()) overall_rc = 1;
+        } else {
+            for (size_t i = 0; i < batch_files.size(); i++) {
+                if (g_gui_interrupted.load()) break;
+                int rc = process_decode_file(i);
+                if (rc != 0) overall_rc = rc;
+                batch_completed.fetch_add(1, std::memory_order_relaxed);
+                batch_progress();
             }
         }
+        set_progress_show_cerr(true);
         return overall_rc;
     }
 
@@ -806,6 +981,13 @@ private:
         m_encodeSpbLabel->Hide();
         m_encodeSectorsPerBlock->Hide();
 
+#ifdef DEBUG
+        gb->Add(new wxStaticText(m_encodePanel, wxID_ANY, "Stream jobs (0=auto):"));
+        m_encodeJobs = new wxSpinCtrl(m_encodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                       wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_encodeJobs, 0, wxEXPAND);
+#endif
+
         m_encodeSeekable->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             if (m_encodeSeekable->GetValue()) {
                 m_encodeSpbLabel->Show();
@@ -863,6 +1045,13 @@ private:
         cbSizer->Add(m_decodeVerify, 0, wxRIGHT, 10);
         cbSizer->Add(m_decodeDeleteSource);
         gb->Add(cbSizer);
+
+#ifdef DEBUG
+        gb->Add(new wxStaticText(m_decodePanel, wxID_ANY, "Stream jobs (0=auto):"));
+        m_decodeJobs = new wxSpinCtrl(m_decodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                       wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_decodeJobs, 0, wxEXPAND);
+#endif
 
         s->Add(gb, 0, wxEXPAND | wxALL, 10);
         m_decodePanel->SetSizer(s);
@@ -926,6 +1115,18 @@ private:
         m_batchEncodeSpbLabel->Hide();
         m_batchEncodeSectorsPerBlock->Hide();
 
+        gb->Add(new wxStaticText(m_batchEncodePanel, wxID_ANY, "Parallel batch jobs (0=auto):"));
+        m_batchEncodeJobs = new wxSpinCtrl(m_batchEncodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                           wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_batchEncodeJobs, 0, wxEXPAND);
+
+#ifdef DEBUG
+        gb->Add(new wxStaticText(m_batchEncodePanel, wxID_ANY, "Per-file stream jobs (debug):"));
+        m_batchEncodeStreamJobs = new wxSpinCtrl(m_batchEncodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                                  wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_batchEncodeStreamJobs, 0, wxEXPAND);
+#endif
+
         m_batchEncodeSeekable->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             if (m_batchEncodeSeekable->GetValue()) {
                 m_batchEncodeSpbLabel->Show();
@@ -980,6 +1181,18 @@ private:
         bdCbSizer->Add(m_batchDecodeDeleteSource);
         gb->Add(bdCbSizer);
 
+        gb->Add(new wxStaticText(m_batchDecodePanel, wxID_ANY, "Parallel batch jobs (0=auto):"));
+        m_batchDecodeJobs = new wxSpinCtrl(m_batchDecodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                           wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_batchDecodeJobs, 0, wxEXPAND);
+
+#ifdef DEBUG
+        gb->Add(new wxStaticText(m_batchDecodePanel, wxID_ANY, "Per-file stream jobs (debug):"));
+        m_batchDecodeStreamJobs = new wxSpinCtrl(m_batchDecodePanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+                                                  wxSP_ARROW_KEYS, 0, 64, 0);
+        gb->Add(m_batchDecodeStreamJobs, 0, wxEXPAND);
+#endif
+
         s->Add(gb, 0, wxEXPAND | wxALL, 10);
         m_batchDecodePanel->SetSizer(s);
         m_notebook->AddPage(m_batchDecodePanel, "Batch Decode");
@@ -1028,7 +1241,7 @@ private:
                         HKEY hkIcon;
                         if (RegCreateKeyExW(hkProg, L"DefaultIcon", 0, nullptr,
                             REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hkIcon, nullptr) == ERROR_SUCCESS) {
-                            wxString iconPath = exePath + L",2";
+                            wxString iconPath = exePath + wxString::Format(L",-%d", IDI_ECM3FILE);
                             RegSetValueExW(hkIcon, nullptr, 0, REG_SZ,
                                 reinterpret_cast<const BYTE*>(iconPath.wc_str()),
                                 (iconPath.length() + 1) * sizeof(wchar_t));
@@ -1146,6 +1359,58 @@ private:
         m_cueSplitInput->SetDropTarget(new FileDropTarget(m_cueSplitInput));
     }
 
+    void CreateBatchCueSplitTab() {
+        m_batchCueSplitPanel = new wxPanel(m_notebook);
+        auto* s = new wxBoxSizer(wxVERTICAL);
+
+        // Mode radio box (Split / Combine)
+        wxString modeChoices[] = {
+            wxString::FromUTF8("Split (combined \xe2\x96\xb6 per-track)"),
+            wxString::FromUTF8("Combine (per-track \xe2\x96\xb6 combined)  ")
+        };
+        m_batchCueSplitMode = new wxRadioBox(m_batchCueSplitPanel, wxID_ANY, "Mode",
+            wxDefaultPosition, wxDefaultSize, 2, modeChoices, 1, wxRA_SPECIFY_ROWS);
+        m_batchCueSplitMode->SetSelection(0);
+        s->Add(m_batchCueSplitMode, 0, wxALL, 10);
+
+        // Directory input
+        auto* dirSizer = new wxBoxSizer(wxHORIZONTAL);
+        dirSizer->Add(new wxStaticText(m_batchCueSplitPanel, wxID_ANY, "Directory (recurses for .cue files):"),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        m_batchCueSplitDir = new wxDirPickerCtrl(m_batchCueSplitPanel, wxID_ANY, wxEmptyString,
+            "Select directory", wxDefaultPosition, wxDefaultSize, wxDIRP_USE_TEXTCTRL);
+        dirSizer->Add(m_batchCueSplitDir, 1, wxEXPAND);
+        s->Add(dirSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Output directory (required)
+        auto* outSizer = new wxBoxSizer(wxHORIZONTAL);
+        outSizer->Add(new wxStaticText(m_batchCueSplitPanel, wxID_ANY, "Output dir (required):"),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        m_batchCueSplitOutput = new wxDirPickerCtrl(m_batchCueSplitPanel, wxID_ANY, wxEmptyString,
+            "Select output directory", wxDefaultPosition, wxDefaultSize, wxDIRP_USE_TEXTCTRL);
+        outSizer->Add(m_batchCueSplitOutput, 1, wxEXPAND);
+        s->Add(outSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Force overwrite checkbox
+        auto* forceSizer = new wxBoxSizer(wxHORIZONTAL);
+        m_batchCueSplitForce = new wxCheckBox(m_batchCueSplitPanel, wxID_ANY, "Force overwrite");
+        forceSizer->Add(m_batchCueSplitForce, 0, wxEXPAND);
+        s->Add(forceSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Parallel batch jobs
+        auto* jobsSizer = new wxBoxSizer(wxHORIZONTAL);
+        jobsSizer->Add(new wxStaticText(m_batchCueSplitPanel, wxID_ANY, "Parallel batch jobs (0=auto):"),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        m_batchCueSplitJobs = new wxSpinCtrl(m_batchCueSplitPanel, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize,
+            wxSP_ARROW_KEYS, 0, 64, 0);
+        jobsSizer->Add(m_batchCueSplitJobs, 0, wxEXPAND);
+        s->Add(jobsSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        s->AddStretchSpacer();
+        m_batchCueSplitPanel->SetSizer(s);
+        m_notebook->AddPage(m_batchCueSplitPanel, "Batch Split/Combine CUE");
+    }
+
     int RunCueSplit() {
         std::string cuePath = m_cueSplitInput->GetPath().ToStdString();
         if (cuePath.empty()) {
@@ -1168,6 +1433,127 @@ private:
         } else {
             return cue_cmd_combine(cuePath, outDir, force);
         }
+    }
+
+    int RunBatchCueSplit() {
+        std::string dir = m_batchCueSplitDir->GetPath().ToStdString();
+        if (dir.empty()) {
+            std::cerr << "ERROR: No directory specified.\n";
+            return 1;
+        }
+
+        std::string outDir = m_batchCueSplitOutput->GetPath().ToStdString();
+        if (outDir.empty()) {
+            std::cerr << "ERROR: No output directory specified. Output directory is required to preserve input files.\n";
+            return 1;
+        }
+
+        bool force = m_batchCueSplitForce->GetValue();
+        bool doSplit = (m_batchCueSplitMode->GetSelection() == 0);
+
+        // Collect .cue files recursively
+        std::vector<std::string> batch_files;
+        try {
+            for (auto& p : std::filesystem::recursive_directory_iterator(dir)) {
+                if (p.is_regular_file()) {
+                    auto ext = p.path().extension().string();
+                    if (ext == ".cue" || ext == ".CUE")
+                        batch_files.push_back(p.path().string());
+                }
+            }
+        } catch (const std::filesystem::filesystem_error&) {
+            std::cerr << "ERROR: cannot access directory: " << dir << "\n";
+            return 1;
+        }
+
+        if (batch_files.empty()) {
+            std::cerr << "ERROR: no .cue files found in " << dir << "\n";
+            return 1;
+        }
+
+        std::cout << "Found " << batch_files.size() << " .cue file(s) to "
+                  << (doSplit ? "split" : "combine") << "\n";
+
+        uint32_t batch_jobs = static_cast<uint32_t>(m_batchCueSplitJobs->GetValue());
+        if (batch_jobs == 0) {
+            unsigned int hc = std::thread::hardware_concurrency();
+            batch_jobs = (hc > 0) ? hc : 1;
+        }
+
+        int overall_rc = 0;
+        std::mutex output_mutex;
+        std::atomic<size_t> batch_completed{0};
+
+        auto batch_progress = [&]() {
+            size_t done = batch_completed.load(std::memory_order_relaxed);
+            int pct = static_cast<int>(done * 100 / batch_files.size());
+            wxCommandEvent* evt = new wxCommandEvent(EVT_PROGRESS_GAUGE);
+            evt->SetInt(pct);
+            wxQueueEvent(wxTheApp->GetTopWindow(), evt);
+        };
+
+        auto output_text = [&](const std::string& text) {
+            wxCommandEvent* evt = new wxCommandEvent(EVT_APPEND_TEXT);
+            evt->SetString(text);
+            std::lock_guard<std::mutex> lock(output_mutex);
+            wxQueueEvent(m_output, evt);
+        };
+
+        auto process_file = [&](size_t i) -> int {
+            std::ostringstream buf;
+            buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
+                << std::filesystem::path(batch_files[i]).filename().string() << "\n";
+            output_text(buf.str());
+
+            int rc;
+            if (doSplit) {
+                rc = cue_cmd_split(batch_files[i], outDir, force);
+            } else {
+                rc = cue_cmd_combine(batch_files[i], outDir, force);
+            }
+
+            return rc;
+        };
+
+        std::cout << "\nBatch " << (doSplit ? "split" : "combine") << " starting with "
+                  << batch_jobs << " job(s)...\n";
+
+        if (batch_jobs > 1 && batch_files.size() > 1) {
+            std::atomic<size_t> next_idx(0);
+            std::atomic<int> any_error(0);
+
+            auto worker = [&]() {
+                while (true) {
+                    size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= batch_files.size()) break;
+                    if (g_gui_interrupted.load()) break;
+
+                    int rc = process_file(i);
+                    if (rc != 0) any_error.store(1, std::memory_order_relaxed);
+                    batch_completed.fetch_add(1, std::memory_order_relaxed);
+                    batch_progress();
+                }
+            };
+
+            size_t num_threads = (std::min)((size_t)batch_jobs, batch_files.size());
+            std::vector<std::thread> threads;
+            for (size_t t = 0; t < num_threads; t++)
+                threads.emplace_back(worker);
+            for (auto& t : threads)
+                t.join();
+
+            if (any_error.load()) overall_rc = 1;
+        } else {
+            for (size_t i = 0; i < batch_files.size(); i++) {
+                if (g_gui_interrupted.load()) break;
+                int rc = process_file(i);
+                if (rc != 0) overall_rc = rc;
+                batch_completed.fetch_add(1, std::memory_order_relaxed);
+                batch_progress();
+            }
+        }
+
+        return overall_rc;
     }
 };
 

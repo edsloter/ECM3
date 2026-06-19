@@ -302,6 +302,7 @@ private:
     wxDirPickerCtrl* m_batchCueSplitDir;
     wxDirPickerCtrl* m_batchCueSplitOutput;
     wxCheckBox* m_batchCueSplitForce;
+    wxCheckBox* m_batchCueSplitCopy;
     wxSpinCtrl* m_batchCueSplitJobs;
 
     wxTextCtrl* m_output;
@@ -1397,6 +1398,14 @@ private:
         forceSizer->Add(m_batchCueSplitForce, 0, wxEXPAND);
         s->Add(forceSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
+        // Copy unmodified checkbox
+        auto* copySizer = new wxBoxSizer(wxHORIZONTAL);
+        m_batchCueSplitCopy = new wxCheckBox(m_batchCueSplitPanel, wxID_ANY,
+            "Copy unmodified files to output (single-track / already combined)");
+        m_batchCueSplitCopy->SetValue(true);
+        copySizer->Add(m_batchCueSplitCopy, 0, wxEXPAND);
+        s->Add(copySizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
         // Parallel batch jobs
         auto* jobsSizer = new wxBoxSizer(wxHORIZONTAL);
         jobsSizer->Add(new wxStaticText(m_batchCueSplitPanel, wxID_ANY, "Parallel batch jobs (0=auto):"),
@@ -1450,6 +1459,7 @@ private:
 
         bool force = m_batchCueSplitForce->GetValue();
         bool doSplit = (m_batchCueSplitMode->GetSelection() == 0);
+        bool copyUnmodified = m_batchCueSplitCopy->GetValue();
 
         // Collect .cue files recursively
         std::vector<std::string> batch_files;
@@ -1504,6 +1514,58 @@ private:
             buf << "\n[" << (i + 1) << "/" << batch_files.size() << "] "
                 << std::filesystem::path(batch_files[i]).filename().string() << "\n";
             output_text(buf.str());
+
+            // Check if this file is a no-op (single-track for split, already combined for combine)
+            cue_sheet sheet;
+            bool isNoop = false;
+            if (cue_parse(batch_files[i], sheet) == 0) {
+                if (doSplit) {
+                    isNoop = (sheet.tracks.size() <= 1);
+                } else {
+                    isNoop = (sheet.file_order.size() <= 1);
+                }
+            }
+
+            if (isNoop && copyUnmodified) {
+                std::string cueDir = get_cue_dir(batch_files[i]);
+                namespace fs = std::filesystem;
+                fs::create_directories(fs::path(outDir));
+
+                // Copy the .cue file
+                fs::path cueOut = fs::path(outDir) / fs::path(batch_files[i]).filename();
+                if (!force && fs::exists(cueOut)) {
+                    buf.str("");
+                    buf << "  ERROR: " << cueOut.filename().string()
+                        << " already exists (check Force overwrite)\n";
+                    output_text(buf.str());
+                    return 1;
+                }
+                fs::copy_file(batch_files[i], cueOut,
+                    force ? fs::copy_options::overwrite_existing : fs::copy_options::none);
+                buf.str("");
+                buf << "  Copied CUE: " << cueOut.filename().string() << "\n";
+                output_text(buf.str());
+
+                // Copy each referenced .bin file
+                for (const auto& ref : sheet.file_order) {
+                    fs::path binSrc = fs::path(cueDir) / ref;
+                    fs::path binOut = fs::path(outDir) / fs::path(ref).filename();
+                    if (!force && fs::exists(binOut)) {
+                        buf.str("");
+                        buf << "  ERROR: " << binOut.filename().string()
+                            << " already exists (check Force overwrite)\n";
+                        output_text(buf.str());
+                        return 1;
+                    }
+                    fs::copy_file(binSrc, binOut,
+                        force ? fs::copy_options::overwrite_existing : fs::copy_options::none);
+                    buf.str("");
+                    buf << "  Copied BIN: " << binOut.filename().string() << "\n";
+                    output_text(buf.str());
+                }
+
+                return 0;
+            }
 
             int rc;
             if (doSplit) {

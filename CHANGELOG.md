@@ -13,6 +13,12 @@ All notable changes to ecm-tools-reloaded are documented in this file.
   parallel jobs (0=auto). Output directory is required to preserve input
   files. Includes Force overwrite checkbox.
 
+- **Copy unmodified files on batch CUE** — New "Copy unmodified files to
+  output" checkbox on the Batch Split/Combine CUE tab. When checked,
+  single-track CUEs (split mode) and already-combined CUEs (combine mode)
+  are copied as-is to the output directory instead of being skipped.
+  Respects the Force overwrite setting.
+
 ## [3.0.1.5] — 2026-06-15
 
 ### Bug Fixes

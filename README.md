@@ -9,7 +9,7 @@ For a full list of changes, see [CHANGELOG.md](CHANGELOG.md).
 
 ## GUI
 
-ecm3 ships with a full **wxWidgets 3.2+** graphical interface (`ecm3-gui`) alongside the CLI tool. It provides the same encode/decode, batch, and CUE split/combine functionality without needing command-line flags.
+ecm3 ships with a full **wxWidgets 3.3+** graphical interface (`ecm3-gui`) alongside the CLI tool. It provides the same encode/decode, batch, and CUE split/combine functionality without needing command-line flags.
 
 | Platform | Build method | Script |
 |---|---|---|

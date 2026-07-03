@@ -13,7 +13,7 @@ ecm3 ships with a full **wxWidgets 3.2+** graphical interface (`ecm3-gui`) along
 
 | Platform | Build method | Script |
 |---|---|---|
-| Windows | MSYS2 MinGW64 (g++ 16.1.0+) | `build_gui.ps1 -Static` |
+| Windows | MSYS2 UCRT64 (g++ 16.1.0+) | `build_gui.ps1 -Static` |
 | Linux | wx-config / wx-config-static | `./build_gui.sh` or `STATIC=1 ./build_gui.sh` |
 
 The GUI is built as a separate executable (`ecm3-gui`) from the same source tree. The CLI `ecm3` executable has no dependency on wxWidgets.
@@ -222,19 +222,13 @@ Required static libraries: zlib, FLAC, liblzma, WavPack (all in-tree). The build
 
 ### Windows (GUI)
 
-Requires [MSYS2 MinGW64](https://www.msys2.org/) with wxWidgets 3.2+ installed:
+Requires [MSYS2 UCRT64](https://www.msys2.org/) with wxWidgets 3.3+ installed:
 
-```
-pacman -S mingw-w64-x86_64-wxWidgets
-```
-
-Then from PowerShell:
-
-```
-powershell -File build_gui.ps1 -Static
+```powershell
+pacman -S mingw-w64-ucrt-x86_64-wxwidgets3.3-msw
 ```
 
-MSYS2 MinGW64 g++ 16.1.0+ is required (system g++ 14.2.0 has a C++ ABI mismatch with MSYS2 wxWidgets DLLs).
+MSYS2 UCRT64 g++ 16.1.0+ is required (system g++ 14.2.0 has a C++ ABI mismatch with MSYS2 wxWidgets DLLs).
 
 Produces `release/win64_gui/ecm3-gui.exe` (fully static, ~9.8 MB).
 

@@ -11,9 +11,9 @@ DEBUG="${DEBUG:-}"
 UNAME=$(uname -s 2>/dev/null || echo Windows_NT)
 case "$UNAME" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        PLATFORM=windows; export PATH="/mingw64/bin:$PATH"; EXE=".exe"
+        PLATFORM=windows; export PATH="/ucrt64/bin:$PATH"; EXE=".exe"
         RELEASE="$SCRIPT_DIR/release/win64_gui"
-        for d in "/c/Program Files/CMake/bin" "/mingw64/bin"; do
+        for d in "/c/Program Files/CMake/bin" "/ucrt64/bin"; do
             [ -x "$d/cmake.exe" ] && export PATH="$d:$PATH" && break
         done
         ;;
@@ -124,10 +124,10 @@ for lib in zlib/libz.a flac/src/libFLAC/libFLAC-static.a xz/build/liblzma.a wavp
 done
 [ "$MISSING" -ne 0 ] && exit 1
 
-# ── Compile .rc (Windows only) ──
+#  Compile .rc (Windows only) ──
 RES=""
 if [ "$PLATFORM" = "windows" ] && command -v windres >/dev/null 2>&1; then
-    windres -O coff resources.rc resources.o && RES="resources.o"
+    windres -I. -O coff resources.rc resources.o && RES="resources.o"
 fi
 
 # ── Compile ──
@@ -141,7 +141,7 @@ OPT_FLAGS="-Os -s -ffunction-sections -Wl,-gc-sections"
 [ -n "$DEBUG" ] && OPT_FLAGS="-g -O0 -DDEBUG"
 
 OGG_LIB=""
-[ "$PLATFORM" = "windows" ] && [ -f /mingw64/lib/libogg.a ] && OGG_LIB=/mingw64/lib/libogg.a
+[ "$PLATFORM" = "windows" ] && [ -f /ucrt64/lib/libogg.a ] && OGG_LIB=/ucrt64/lib/libogg.a
 [ "$PLATFORM" = "unix" ] && for p in /usr/lib/x86_64-linux-gnu/libogg.a /usr/lib/libogg.a; do [ -f "$p" ] && { OGG_LIB="$p"; break; }; done
 
 g++ $OPT_FLAGS \

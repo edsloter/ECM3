@@ -12,8 +12,8 @@ foreach ($candidate in @("C:\msys64\usr\bin\bash.exe", "C:\msys32\usr\bin\bash.e
     if (Test-Path $candidate) { $MsysBash = $candidate; break }
 }
 if (-not $MsysBash) {
-    Write-Host "ERROR: MSYS2 bash not found. Install MSYS2 with mingw-w64-x86_64-wxwidgets3.2-msw." -ForegroundColor Red
-    Write-Host "  pacman -S mingw-w64-x86_64-wxwidgets3.2-msw" -ForegroundColor Yellow
+    Write-Host "ERROR: MSYS2 bash not found. Install MSYS2 with mingw-w64-ucrt-x86_64-wxwidgets3.3-msw." -ForegroundColor Red
+    Write-Host "  pacman -S mingw-w64-ucrt-x86_64-wxwidgets3.3-msw" -ForegroundColor Yellow
     exit 1
 }
 

@@ -12,9 +12,9 @@ DEBUG="${DEBUG:-}"
 UNAME=$(uname -s 2>/dev/null || echo Windows_NT)
 case "$UNAME" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        PLATFORM=windows; export PATH="/mingw64/bin:$PATH"; EXE=".exe"
-        RELEASE="$PROJECT_ROOT/release/win64"
-        for d in "/c/Program Files/CMake/bin" "/mingw64/bin"; do
+        PLATFORM=windows; export PATH="/ucrt64/bin:$PATH"; EXE=".exe"
+        RELEASE="$PROJECT_ROOT/release/win64_cli"
+        for d in "/c/Program Files/CMake/bin" "/ucrt64/bin"; do
             [ -x "$d/cmake.exe" ] && export PATH="$d:$PATH" && break
         done
         ;;
@@ -117,7 +117,7 @@ OPT_FLAGS="-Os -s -ffunction-sections -Wl,-gc-sections"
 
 # Find ogg static lib
 OGG_LIB=""
-[ "$PLATFORM" = "windows" ] && [ -f /mingw64/lib/libogg.a ] && OGG_LIB=/mingw64/lib/libogg.a
+[ "$PLATFORM" = "windows" ] && [ -f /ucrt64/lib/libogg.a ] && OGG_LIB=/ucrt64/lib/libogg.a
 [ "$PLATFORM" = "unix" ] && for p in /usr/lib/x86_64-linux-gnu/libogg.a /usr/lib/libogg.a; do [ -f "$p" ] && { OGG_LIB="$p"; break; }; done
 
 # ── Compile .rc (Windows only) ──

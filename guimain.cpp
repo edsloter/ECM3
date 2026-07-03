@@ -30,6 +30,7 @@
 #include <wx/dnd.h>
 #include <wx/stdpaths.h>
 #include <wx/filename.h>
+#include <wx/sysopt.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -52,6 +53,24 @@
 #include <filesystem>
 
 static std::atomic<bool> g_gui_interrupted{false};
+static std::atomic<bool> g_darkMode{true};
+
+// Suppress wxWidgets manifest warning and set dark mode before wxApp initialization
+static struct AppInitializer {
+    AppInitializer() {
+        wxSystemOptions::SetOption("msw.no-manifest-check", 1);
+        
+        // Check command line for light mode override
+        LPWSTR cmdLine = ::GetCommandLineW();
+        if (cmdLine && wcsstr(cmdLine, L"--light-mode")) {
+            wxSystemOptions::SetOption("msw.dark-mode", 0);
+            g_darkMode.store(false);
+        } else {
+            wxSystemOptions::SetOption("msw.dark-mode", 1);
+            g_darkMode.store(true);
+        }
+    }
+} g_appInitializer;
 
 // ── Thread-safe stream redirector: captures cout/cerr into a wxTextCtrl ──
 // Uses a mutex + wxCommandEvent to safely post text from any thread.
@@ -152,6 +171,14 @@ public:
         auto* panel = new wxPanel(this);
         auto* topSizer = new wxBoxSizer(wxVERTICAL);
 
+        auto* darkModeSizer = new wxBoxSizer(wxHORIZONTAL);
+        darkModeSizer->AddStretchSpacer();
+        m_darkMode = new wxCheckBox(panel, wxID_ANY, "Dark mode");
+        m_darkMode->SetValue(g_darkMode.load());
+        m_darkMode->Bind(wxEVT_CHECKBOX, &Ecm3Frame::OnDarkModeToggle, this);
+        darkModeSizer->Add(m_darkMode, 0, wxALL, 5);
+        topSizer->Add(darkModeSizer, 0, wxEXPAND);
+
         m_notebook = new wxNotebook(panel, wxID_ANY);
 
         CreateEncodeTab();
@@ -195,14 +222,23 @@ public:
         topSizer->Add(btnSizer, 0, wxEXPAND | wxALL, 5);
 
         panel->SetSizer(topSizer);
-        CreateStatusBar();
-        SetStatusText("Ready");
+
+        // Custom status bar (panel-based for full color control)
+        m_statusBarPanel = new wxPanel(panel);
+        m_statusText = new wxStaticText(m_statusBarPanel, wxID_ANY, "Ready");
+        auto* statusSizer = new wxBoxSizer(wxHORIZONTAL);
+        statusSizer->Add(m_statusText, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+        m_statusBarPanel->SetSizer(statusSizer);
+        topSizer->Add(m_statusBarPanel, 0, wxEXPAND);
 
         m_coutBuf = std::cout.rdbuf();
         m_cerrBuf = std::cerr.rdbuf();
         m_stream = new TextCtrlStream(m_output);
         std::cout.rdbuf(m_stream);
         std::cerr.rdbuf(m_stream);
+
+        // Apply manual dark mode styling to buttons and status bar
+        ApplyManualDarkMode(this, g_darkMode.load());
     }
 
     ~Ecm3Frame() override {
@@ -303,11 +339,15 @@ private:
     wxDirPickerCtrl* m_batchCueSplitOutput;
     wxCheckBox* m_batchCueSplitForce;
     wxCheckBox* m_batchCueSplitCopy;
+    wxCheckBox* m_batchCueSplitDelete;
     wxSpinCtrl* m_batchCueSplitJobs;
 
     wxTextCtrl* m_output;
     wxGauge* m_progressGauge;
     wxButton* m_runBtn;
+    wxCheckBox* m_darkMode;
+    wxPanel* m_statusBarPanel;
+    wxStaticText* m_statusText;
 
     std::thread m_worker;
     std::atomic<bool> m_running{false};
@@ -327,7 +367,7 @@ private:
         m_runBtn->Disable();
         m_output->Clear();
         m_progressGauge->SetValue(0);
-        SetStatusText("Running...");
+        m_statusText->SetLabel("Running...");
         g_gui_interrupted.store(false);
         g_gui_interrupted.store(false);
 
@@ -372,7 +412,7 @@ private:
                 m_running = false;
                 m_progressGauge->SetValue(100);
                 m_runBtn->Enable();
-                SetStatusText("Done");
+                m_statusText->SetLabel("Done");
                 set_progress_callback(nullptr);
             });
         });
@@ -1406,6 +1446,14 @@ private:
         copySizer->Add(m_batchCueSplitCopy, 0, wxEXPAND);
         s->Add(copySizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
+        // Delete originals checkbox
+        auto* deleteSizer = new wxBoxSizer(wxHORIZONTAL);
+        m_batchCueSplitDelete = new wxCheckBox(m_batchCueSplitPanel, wxID_ANY,
+            "Delete original BIN/CUE files after processing");
+        m_batchCueSplitDelete->SetValue(true);
+        deleteSizer->Add(m_batchCueSplitDelete, 0, wxEXPAND);
+        s->Add(deleteSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
         // Parallel batch jobs
         auto* jobsSizer = new wxBoxSizer(wxHORIZONTAL);
         jobsSizer->Add(new wxStaticText(m_batchCueSplitPanel, wxID_ANY, "Parallel batch jobs (0=auto):"),
@@ -1460,6 +1508,7 @@ private:
         bool force = m_batchCueSplitForce->GetValue();
         bool doSplit = (m_batchCueSplitMode->GetSelection() == 0);
         bool copyUnmodified = m_batchCueSplitCopy->GetValue();
+        bool deleteOriginals = m_batchCueSplitDelete->GetValue();
 
         // Collect .cue files recursively
         std::vector<std::string> batch_files;
@@ -1550,6 +1599,12 @@ private:
                 for (const auto& ref : sheet.file_order) {
                     fs::path binSrc = fs::path(cueDir) / ref;
                     fs::path binOut = fs::path(outDir) / fs::path(ref).filename();
+                    if (!fs::exists(binSrc)) {
+                        buf.str("");
+                        buf << "  ERROR: BIN file not found: " << ref << "\n";
+                        output_text(buf.str());
+                        return 1;
+                    }
                     if (!force && fs::exists(binOut)) {
                         buf.str("");
                         buf << "  ERROR: " << binOut.filename().string()
@@ -1564,6 +1619,23 @@ private:
                     output_text(buf.str());
                 }
 
+                if (deleteOriginals) {
+                    std::string cueDir = get_cue_dir(batch_files[i]);
+                    fs::remove(batch_files[i]);
+                    buf.str("");
+                    buf << "  Deleted CUE: " << fs::path(batch_files[i]).filename().string() << "\n";
+                    output_text(buf.str());
+                    for (const auto& ref : sheet.file_order) {
+                        fs::path binSrc = fs::path(cueDir) / ref;
+                        if (fs::exists(binSrc)) {
+                            fs::remove(binSrc);
+                            buf.str("");
+                            buf << "  Deleted BIN: " << fs::path(ref).filename().string() << "\n";
+                            output_text(buf.str());
+                        }
+                    }
+                }
+
                 return 0;
             }
 
@@ -1572,6 +1644,24 @@ private:
                 rc = cue_cmd_split(batch_files[i], outDir, force);
             } else {
                 rc = cue_cmd_combine(batch_files[i], outDir, force);
+            }
+
+            if (rc == 0 && deleteOriginals) {
+                namespace fs = std::filesystem;
+                std::string cueDir = get_cue_dir(batch_files[i]);
+                fs::remove(batch_files[i]);
+                buf.str("");
+                buf << "  Deleted CUE: " << fs::path(batch_files[i]).filename().string() << "\n";
+                output_text(buf.str());
+                for (const auto& ref : sheet.file_order) {
+                    fs::path binSrc = fs::path(cueDir) / ref;
+                    if (fs::exists(binSrc)) {
+                        fs::remove(binSrc);
+                        buf.str("");
+                        buf << "  Deleted BIN: " << fs::path(ref).filename().string() << "\n";
+                        output_text(buf.str());
+                    }
+                }
             }
 
             return rc;
@@ -1590,7 +1680,16 @@ private:
                     if (i >= batch_files.size()) break;
                     if (g_gui_interrupted.load()) break;
 
-                    int rc = process_file(i);
+                    int rc = 1;
+                    try {
+                        rc = process_file(i);
+                    } catch (const std::exception& e) {
+                        std::ostringstream buf;
+                        buf << "  ERROR: " << e.what() << "\n";
+                        output_text(buf.str());
+                    } catch (...) {
+                        output_text("  ERROR: unknown exception\n");
+                    }
                     if (rc != 0) any_error.store(1, std::memory_order_relaxed);
                     batch_completed.fetch_add(1, std::memory_order_relaxed);
                     batch_progress();
@@ -1608,7 +1707,16 @@ private:
         } else {
             for (size_t i = 0; i < batch_files.size(); i++) {
                 if (g_gui_interrupted.load()) break;
-                int rc = process_file(i);
+                int rc = 1;
+                try {
+                    rc = process_file(i);
+                } catch (const std::exception& e) {
+                    std::ostringstream buf;
+                    buf << "  ERROR: " << e.what() << "\n";
+                    output_text(buf.str());
+                } catch (...) {
+                    output_text("  ERROR: unknown exception\n");
+                }
                 if (rc != 0) overall_rc = rc;
                 batch_completed.fetch_add(1, std::memory_order_relaxed);
                 batch_progress();
@@ -1616,6 +1724,64 @@ private:
         }
 
         return overall_rc;
+    }
+
+    void OnDarkModeToggle(wxCommandEvent& event) {
+        bool dark = event.IsChecked();
+        g_darkMode.store(dark);
+        
+        // msw.dark-mode is startup-only, so we must restart the app
+        // Save preference and restart with --light-mode or --dark-mode flag
+        wxString exePath = wxStandardPaths::Get().GetExecutablePath();
+        wxString arg = dark ? "--dark-mode" : "--light-mode";
+        
+        wxExecute(exePath + " " + arg);
+        Close();
+    }
+
+    void ApplyManualDarkMode(wxWindow* window, bool dark) {
+        if (!window) return;
+        
+        wxColour bgColor, fgColor, textBgColor, textColor;
+        
+        if (dark) {
+            bgColor = wxColour(45, 45, 48);
+            fgColor = wxColour(220, 220, 220);
+            textBgColor = wxColour(30, 30, 30);
+            textColor = wxColour(240, 240, 240);
+        } else {
+            bgColor = wxColour(240, 240, 240);
+            fgColor = wxColour(0, 0, 0);
+            textBgColor = wxColour(255, 255, 255);
+            textColor = wxColour(0, 0, 0);
+        }
+
+        // Style buttons
+        if (wxButton* button = wxDynamicCast(window, wxButton)) {
+            button->SetBackgroundColour(bgColor);
+            button->SetForegroundColour(fgColor);
+        }
+        
+        // Style custom status bar
+        if (window == m_statusBarPanel) {
+            m_statusBarPanel->SetBackgroundColour(bgColor);
+            m_statusText->SetForegroundColour(fgColor);
+            m_statusBarPanel->Refresh();
+        }
+        
+        // Style progress bar
+        if (wxGauge* gauge = wxDynamicCast(window, wxGauge)) {
+            gauge->SetBackgroundColour(bgColor);
+        }
+        
+        // Recursively apply to children
+        const wxWindowList& children = window->GetChildren();
+        for (wxWindowList::const_iterator it = children.begin(); it != children.end(); ++it) {
+            ApplyManualDarkMode(*it, dark);
+        }
+        
+        window->Refresh();
+        window->Update();
     }
 };
 
@@ -1625,9 +1791,12 @@ public:
     bool OnInit() override {
         auto* frame = new Ecm3Frame();
         frame->Show(true);
+        // Skip argv[1] processing if it's a dark mode flag
         if (argc > 1) {
             wxString arg = argv[1];
-            if (arg.Lower().EndsWith(".ecm3")) {
+            if (arg == "--light-mode" || arg == "--dark-mode") {
+                // already handled
+            } else if (arg.Lower().EndsWith(".ecm3")) {
                 frame->m_decodeInput->SetPath(arg);
                 frame->m_notebook->SetSelection(1);
             } else if (arg.Lower().EndsWith(".cue") || arg.Lower().EndsWith(".bin")) {

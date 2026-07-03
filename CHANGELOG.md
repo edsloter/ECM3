@@ -2,6 +2,42 @@
 
 All notable changes to ecm-tools-reloaded are documented in this file.
 
+## [3.0.1.8] — 2026-07-03
+
+### GUI
+
+- **Dark mode toggle** — New "Dark mode" checkbox in the upper right corner
+  of the main window (checked by default). Uses built-in wxWidgets 3.3 dark
+  mode (`msw.dark-mode`) for native theming of titlebar, notebook tabs,
+  scrollbars, and checkboxes. Custom panel-based status bar replaces the
+  native `wxStatusBar` to allow full color control. Hardcoded light/dark
+  colors ensure the toggle works correctly regardless of the OS theme.
+  Progress bar and buttons are styled manually. Toggling the checkbox
+  restarts the application with `--light-mode` or `--dark-mode` command-line
+  arguments, since `msw.dark-mode` is a startup-only option.
+
+## [3.0.1.7] — 2026-07-03
+
+- **Delete originals option for Batch CUE** — New "Delete original BIN/CUE
+  files after processing" checkbox on the Batch Split/Combine CUE tab
+  (checked by default). When enabled, original CUE and referenced BIN files
+  are deleted after successful split or combine operations.
+
+### Bug Fixes
+
+- **Batch CUE split missing BIN check** — When splitting CUE sheets in batch
+  mode, referenced BIN files that do not exist now produce a clear error
+  message instead of proceeding silently.
+
+- **Batch encode/decode exception handling** — `process_file` calls in batch
+  operations are now wrapped in try/catch blocks. Unhandled exceptions
+  (including unknown types) are caught and reported per-file, preventing a
+  single failure from crashing the entire batch.
+
+- **wxWidgets manifest warning** — Suppressed the Common Controls Library v6
+  deprecation warning via global `wxSystemOptions::SetOption("msw.no-manifest-check", 1)`
+  initializer that runs before wxApp creation. Icons display correctly.
+
 ## [3.0.1.6] — 2026-06-18
 
 ### GUI

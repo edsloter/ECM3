@@ -2,6 +2,21 @@
 
 All notable changes to ecm-tools-reloaded are documented in this file.
 
+## [3.0.1.9] — 2026-07-03
+
+### GUI
+
+- **Copy unmodified files for CUE Split/Combine** — New "Copy unmodified
+  files to output (single-track / already combined)" checkbox on the
+  Split/Combine CUE tab (checked by default). When enabled, single-track
+  CUEs (split mode) and already-combined CUEs (combine mode) are copied
+  as-is to the output directory instead of being skipped.
+
+- **Delete originals option for CUE Split/Combine** — New "Delete original
+  BIN/CUE files after processing" checkbox on the Split/Combine CUE tab
+  (checked by default). When enabled, original CUE and referenced BIN files
+  are deleted after successful split or combine operations.
+
 ## [3.0.1.8] — 2026-07-03
 
 ### GUI
@@ -15,8 +30,6 @@ All notable changes to ecm-tools-reloaded are documented in this file.
   Progress bar and buttons are styled manually. Toggling the checkbox
   restarts the application with `--light-mode` or `--dark-mode` command-line
   arguments, since `msw.dark-mode` is a startup-only option.
-
-## [3.0.1.7] — 2026-07-03
 
 - **Delete originals option for Batch CUE** — New "Delete original BIN/CUE
   files after processing" checkbox on the Batch Split/Combine CUE tab

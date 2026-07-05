@@ -331,6 +331,8 @@ private:
     wxFilePickerCtrl* m_cueSplitInput;
     wxDirPickerCtrl* m_cueSplitOutput;
     wxCheckBox* m_cueSplitForce;
+    wxCheckBox* m_cueSplitCopy;
+    wxCheckBox* m_cueSplitDelete;
 
     // Batch CUE Split/Combine tab
     wxPanel* m_batchCueSplitPanel;
@@ -1390,8 +1392,24 @@ private:
         // Options
         auto* cbSizer = new wxBoxSizer(wxHORIZONTAL);
         m_cueSplitForce = new wxCheckBox(m_cueSplitPanel, wxID_ANY, "Force overwrite");
-        cbSizer->Add(m_cueSplitForce);
+        cbSizer->Add(m_cueSplitForce, 0, wxRIGHT, 10);
         s->Add(cbSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Copy unmodified checkbox
+        auto* copySizer = new wxBoxSizer(wxHORIZONTAL);
+        m_cueSplitCopy = new wxCheckBox(m_cueSplitPanel, wxID_ANY,
+            "Copy unmodified files to output (single-track / already combined)");
+        m_cueSplitCopy->SetValue(true);
+        copySizer->Add(m_cueSplitCopy, 0, wxEXPAND);
+        s->Add(copySizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Delete originals checkbox
+        auto* deleteSizer = new wxBoxSizer(wxHORIZONTAL);
+        m_cueSplitDelete = new wxCheckBox(m_cueSplitPanel, wxID_ANY,
+            "Delete original BIN/CUE files after processing");
+        m_cueSplitDelete->SetValue(true);
+        deleteSizer->Add(m_cueSplitDelete, 0, wxEXPAND);
+        s->Add(deleteSizer, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
         s->AddStretchSpacer();
         m_cueSplitPanel->SetSizer(s);
@@ -1485,11 +1503,83 @@ private:
         }
         bool force = m_cueSplitForce->GetValue();
         bool doSplit = (m_cueSplitMode->GetSelection() == 0);
-        if (doSplit) {
-            return cue_cmd_split(cuePath, outDir, force);
-        } else {
-            return cue_cmd_combine(cuePath, outDir, force);
+        bool copyUnmodified = m_cueSplitCopy->GetValue();
+        bool deleteOriginals = m_cueSplitDelete->GetValue();
+
+        namespace fs = std::filesystem;
+
+        // Parse CUE to check if this is a no-op
+        cue_sheet sheet;
+        bool isNoop = false;
+        if (cue_parse(cuePath, sheet) == 0) {
+            if (doSplit) {
+                isNoop = (sheet.tracks.size() <= 1);
+            } else {
+                isNoop = (sheet.file_order.size() <= 1);
+            }
         }
+
+        int rc = 0;
+
+        if (isNoop && copyUnmodified) {
+            // Copy files as-is instead of processing
+            fs::create_directories(fs::path(outDir));
+
+            // Copy the .cue file
+            fs::path cueOut = fs::path(outDir) / fs::path(cuePath).filename();
+            if (!force && fs::exists(cueOut)) {
+                std::cerr << "ERROR: " << cueOut.filename().string()
+                    << " already exists (check Force overwrite)\n";
+                return 1;
+            }
+            fs::copy_file(cuePath, cueOut,
+                force ? fs::copy_options::overwrite_existing : fs::copy_options::none);
+            std::cout << "Copied CUE: " << cueOut.filename().string() << "\n";
+
+            // Copy each referenced .bin file
+            std::string cueDir = get_cue_dir(cuePath);
+            for (const auto& ref : sheet.file_order) {
+                fs::path binSrc = fs::path(cueDir) / ref;
+                fs::path binOut = fs::path(outDir) / fs::path(ref).filename();
+                if (!fs::exists(binSrc)) {
+                    std::cerr << "ERROR: BIN file not found: " << ref << "\n";
+                    return 1;
+                }
+                if (!force && fs::exists(binOut)) {
+                    std::cerr << "ERROR: " << binOut.filename().string()
+                        << " already exists (check Force overwrite)\n";
+                    return 1;
+                }
+                fs::copy_file(binSrc, binOut,
+                    force ? fs::copy_options::overwrite_existing : fs::copy_options::none);
+                std::cout << "Copied BIN: " << binOut.filename().string() << "\n";
+            }
+        } else {
+            // Normal split/combine processing
+            if (doSplit) {
+                rc = cue_cmd_split(cuePath, outDir, force);
+            } else {
+                rc = cue_cmd_combine(cuePath, outDir, force);
+            }
+        }
+
+        if (rc == 0 && deleteOriginals) {
+            // Parse CUE to get referenced BIN files
+            if (cue_parse(cuePath, sheet) == 0) {
+                std::string cueDir = get_cue_dir(cuePath);
+                fs::remove(cuePath);
+                std::cout << "Deleted CUE: " << fs::path(cuePath).filename().string() << "\n";
+                for (const auto& ref : sheet.file_order) {
+                    fs::path binSrc = fs::path(cueDir) / ref;
+                    if (fs::exists(binSrc)) {
+                        fs::remove(binSrc);
+                        std::cout << "Deleted BIN: " << fs::path(ref).filename().string() << "\n";
+                    }
+                }
+            }
+        }
+
+        return rc;
     }
 
     int RunBatchCueSplit() {

@@ -58,9 +58,8 @@ static std::atomic<bool> g_darkMode{true};
 // Suppress wxWidgets manifest warning and set dark mode before wxApp initialization
 static struct AppInitializer {
     AppInitializer() {
+#ifdef _WIN32
         wxSystemOptions::SetOption("msw.no-manifest-check", 1);
-        
-        // Check command line for light mode override
         LPWSTR cmdLine = ::GetCommandLineW();
         if (cmdLine && wcsstr(cmdLine, L"--light-mode")) {
             wxSystemOptions::SetOption("msw.dark-mode", 0);
@@ -69,6 +68,7 @@ static struct AppInitializer {
             wxSystemOptions::SetOption("msw.dark-mode", 1);
             g_darkMode.store(true);
         }
+#endif
     }
 } g_appInitializer;
 

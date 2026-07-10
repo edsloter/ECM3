@@ -2,6 +2,16 @@
 
 All notable changes to ecm-tools-reloaded are documented in this file.
 
+## [3.0.2.0] — 2026-07-10
+
+### Bug Fixes
+
+- **Linux GUI build fix** — Wrapped Windows-specific APIs (`LPWSTR`,
+  `GetCommandLineW`, `wcsstr`) and `wxSystemOptions` calls in `#ifdef _WIN32`
+  in the `AppInitializer` constructor. On non-Windows platforms, dark mode
+  defaults to enabled and can be toggled via the UI checkbox. Fixes compile
+  errors when building the GUI with `build_gui.sh` on Linux.
+
 ## [3.0.1.9] — 2026-07-03
 
 ### GUI

@@ -1,3 +1,4 @@
+![App Screenshot](images/screenshot_ecm3_gui.png)
 # ecm3
 
 Error Code Modeler 3 — encode and decode CD-ROM disc images into the ECM3 format with sector-level lossless compression, track metadata preservation, and bit-identical output across machines.
